@@ -1,0 +1,51 @@
+# bash completion for ayana-cdn (installed by install.sh)
+_ayana_cdn() {
+	local cur prev words cword
+	if declare -F _init_completion >/dev/null 2>&1; then
+		_init_completion || return
+	else
+		cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]} words=("${COMP_WORDS[@]}") cword=$COMP_CWORD
+	fi
+	local cmds="serve status check reload restart config backend routes bench echo-backend version help"
+	case "$prev" in
+	-config | -tls-cert | -tls-key | -pidfile) compopt -o filenames 2>/dev/null; COMPREPLY=($(compgen -f -- "$cur")); return ;;
+	-proto) COMPREPLY=($(compgen -W "wss ws https http sse udp" -- "$cur")); return ;;
+	-lb) COMPREPLY=($(compgen -W "least_conn round_robin first hash" -- "$cur")); return ;;
+	-relay) COMPREPLY=($(compgen -W "upgrade always" -- "$cur")); return ;;
+	-check) COMPREPLY=($(compgen -W "tcp tls http ws off" -- "$cur")); return ;;
+	esac
+	if [ "$cword" -eq 1 ]; then
+		COMPREPLY=($(compgen -W "$cmds" -- "$cur"))
+		return
+	fi
+	local cmd=${words[1]} sub=${words[2]:-} names
+	case "$cmd" in
+	backend)
+		if [ "$cword" -eq 2 ]; then
+			COMPREPLY=($(compgen -W "ls add set rm enable disable" -- "$cur"))
+		elif [ "$cword" -eq 3 ] && [[ $sub =~ ^(set|rm|enable|disable)$ ]]; then
+			names=$(ayana-cdn backend ls -json 2>/dev/null | sed -nE 's/^ *"name": *"([^"]+)".*/\1/p')
+			COMPREPLY=($(compgen -W "$names" -- "$cur"))
+		else
+			case "$sub" in
+			add | set) COMPREPLY=($(compgen -W "-host -proto -listen -tls -tls=false -strip -strip=false -insecure -lb -relay -max-conns -idle-timeout -check -check-path -check-interval -check-expect -upstreams -disabled -no-reload -config" -- "$cur")) ;;
+			rm | enable | disable) COMPREPLY=($(compgen -W "-no-reload -config" -- "$cur")) ;;
+			ls) COMPREPLY=($(compgen -W "-json -config" -- "$cur")) ;;
+			esac
+		fi ;;
+	config)
+		if [ "$cword" -eq 2 ]; then COMPREPLY=($(compgen -W "show" -- "$cur")); else COMPREPLY=($(compgen -W "-raw -config" -- "$cur")); fi ;;
+	routes)
+		if [ "$cword" -eq 2 ]; then COMPREPLY=($(compgen -W "import" -- "$cur"))
+		elif [ "$cword" -eq 3 ]; then compopt -o filenames 2>/dev/null; COMPREPLY=($(compgen -f -- "$cur"))
+		else COMPREPLY=($(compgen -W "-replace -no-reload -config" -- "$cur")); fi ;;
+	serve) COMPREPLY=($(compgen -W "-config -pidfile" -- "$cur")) ;;
+	status) COMPREPLY=($(compgen -W "-json -admin -config" -- "$cur")) ;;
+	check) COMPREPLY=($(compgen -W "-no-dial -config" -- "$cur")) ;;
+	reload) COMPREPLY=($(compgen -W "-config -pidfile" -- "$cur")) ;;
+	restart) COMPREPLY=($(compgen -W "-config -pidfile -timeout -force" -- "$cur")) ;;
+	bench) COMPREPLY=($(compgen -W "-url -connect -sni -c -rate -hold -ping -early -insecure -timeout -expect" -- "$cur")) ;;
+	echo-backend) COMPREPLY=($(compgen -W "-listen -udp -no-upgrade-header -banner -status -raw -tls-cert -tls-key -quiet" -- "$cur")) ;;
+	esac
+}
+complete -F _ayana_cdn ayana-cdn

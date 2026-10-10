@@ -1,0 +1,25 @@
+{
+  "listen": ":443",
+  "proxy_protocol": false,
+  "enable_http2": false,
+  "cdn_host": "cdn.example.com",
+  "tls": {
+    "mode": "acme",
+    "email": "admin@example.com",
+    "cache_dir": "/var/lib/ayana-cdn/acme",
+    "cert_file": "",
+    "key_file": ""
+  },
+  "backends": [
+    { "name": "native1",  "upstream": "native1.example.com:443",  "host": "native1.example.com",  "proto": "wss", "tls": true, "strip": true, "insecure": false },
+    { "name": "native2",  "upstream": "native2.example.com:443",  "host": "native2.example.com",  "proto": "wss", "tls": true, "strip": true, "insecure": false },
+    { "name": "native3",  "upstream": "native3.example.com:443",  "host": "native3.example.com",  "proto": "wss", "tls": true, "strip": true, "insecure": false },
+    { "name": "native4",  "upstream": "native4.example.com:443",  "host": "native4.example.com",  "proto": "wss", "tls": true, "strip": true, "insecure": false },
+    { "name": "native5",  "upstream": "native5.example.com:443",  "host": "native5.example.com",  "proto": "wss", "tls": true, "strip": true, "insecure": false },
+    { "name": "native6",  "upstream": "native6.example.com:443",  "host": "native6.example.com",  "proto": "wss", "tls": true, "strip": true, "insecure": false },
+    { "name": "native7",  "upstream": "native7.example.com:443",  "host": "native7.example.com",  "proto": "wss", "tls": true, "strip": true, "insecure": false },
+    { "name": "native8",  "upstream": "native8.example.com:443",  "host": "native8.example.com",  "proto": "wss", "tls": true, "strip": true, "insecure": false },
+    { "name": "native9",  "upstream": "native9.example.com:443",  "host": "native9.example.com",  "proto": "wss", "tls": true, "strip": true, "insecure": false },
+    { "name": "native10", "upstream": "native10.example.com:443", "host": "native10.example.com", "proto": "wss", "tls": true, "strip": true, "insecure": false }
+  ]
+}

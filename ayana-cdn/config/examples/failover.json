@@ -1,0 +1,21 @@
+{
+  "cdn_hosts": ["cdn.example.com"],
+  "tls": { "mode": "acme", "email": "admin@example.com" },
+  "backends": [
+    {
+      "name": "native1",
+      "upstreams": ["native1.example.com:443", "native1b.example.com:443"],
+      "host": "native1.example.com",
+      "lb": "first",
+      "health_check": { "type": "ws", "path": "/", "interval": "5s", "fall": 2, "rise": 2 }
+    },
+    {
+      "name": "pool",
+      "upstreams": ["10.0.0.11:80", "10.0.0.12:80", "10.0.0.13:80"],
+      "host": "pool.internal",
+      "proto": "ws",
+      "lb": "least_conn",
+      "max_conns": 5000
+    }
+  ]
+}

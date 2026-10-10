@@ -1,0 +1,11 @@
+{
+  "cdn_hosts": ["cdn.example.com"],
+  "tls": { "mode": "acme", "email": "admin@example.com" },
+  "redirect_listen": ":80",
+  "log": { "format": "json" },
+  "backends": [
+    { "name": "panel",  "upstream": "127.0.0.1:8080", "proto": "http", "health_check": { "type": "http", "path": "/health" } },
+    { "name": "events", "upstream": "127.0.0.1:8090", "proto": "http" },
+    { "name": "static", "upstream": "files.internal:443", "proto": "https", "strip": false }
+  ]
+}
