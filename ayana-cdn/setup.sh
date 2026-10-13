@@ -16,6 +16,7 @@ ROUTES=/etc/ayana-cdn/routes.json
 mode=prompt
 routes_file=""
 args=()
+
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--keep-config) mode=keep ;;
@@ -37,8 +38,30 @@ IN=""
 if [ -t 0 ]; then IN=/dev/stdin; elif { : </dev/tty; } 2>/dev/null; then IN=/dev/tty; fi
 ask() { # ask VAR "prompt"
 	local __var=$1
+	[ -n "$IN" ] || { echo "no terminal available; set AYANA_CDN_DOMAIN and AYANA_CDN_EMAIL" >&2; return 1; }
 	read -r -p "$2" "${__var?}" <"$IN"
 }
+
+# Ask for the public TLS/CDN hostname before installation. Environment variables
+# also allow unattended deployments without silently using the package default.
+DOMAIN=${AYANA_CDN_DOMAIN:-}
+EMAIL=${AYANA_CDN_EMAIL:-}
+if [ -z "$DOMAIN" ]; then
+	while true; do
+		ask DOMAIN "Domain for this CDN (e.g. cdn.example.com): "
+		DOMAIN=${DOMAIN,,}
+		if [[ "$DOMAIN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$ ]]; then break; fi
+		echo "Enter a hostname only (no https://, port, path, or IP address)." >&2
+		DOMAIN=""
+	done
+fi
+[[ "$DOMAIN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$ ]] || { echo "invalid AYANA_CDN_DOMAIN hostname: $DOMAIN" >&2; exit 1; }
+if [ -z "$EMAIL" ]; then
+	ask EMAIL "ACME certificate email [admin@$DOMAIN]: " || exit 1
+	EMAIL=${EMAIL:-admin@$DOMAIN}
+fi
+[[ "$EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || { echo "invalid email address: $EMAIL" >&2; exit 1; }
+export AYANA_CDN_DOMAIN="$DOMAIN" AYANA_CDN_EMAIL="$EMAIL"
 
 "$DIR/deploy/install.sh" "${args[@]}"
 

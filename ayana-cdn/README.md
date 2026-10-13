@@ -170,11 +170,16 @@ sudo ayana-cdn panel show                 # prints the https URL to open
 ```
 
 Open `https://<cdn host>/<secret path>/` and sign in with the username and
-password. The panel shows **live per-domain and per-backend traffic** (requests,
-active connections, up/down rate), upstream health, certificate expiry,
-runtime stats, and a **Client IPs** view per backend (which addresses connected,
-how many times, and — with geolocation on — where from), refreshing every few
-seconds. With `-control` it also lets you
+password. The panel shows **live throughput graphs** — a hero upload/download
+area chart over the last few minutes, per-domain sparklines, and a card per
+backend with its **total usage** (cumulative up/down), **live rate** (Mbps),
+a sparkline, and a full per-backend chart with upstream health and
+response-class counts under *Details*. It also shows connections, tunnels,
+certificate expiry, runtime stats, and a **Client IPs** view per backend (which
+addresses connected, how many times, and — with geolocation on — where from),
+refreshing every couple of seconds. The history is kept server-side (a small
+bounded ring buffer), so the graphs are populated the moment you open the panel.
+With `-control` it also lets you
 **manage domains and paths from the browser**: add/remove `cdn_hosts`, and
 add/edit/remove/enable/disable backends — including a local service on this VPS
 (`proto: http`, upstream `127.0.0.1:PORT`), reachable at `/<name>/`. Changes are

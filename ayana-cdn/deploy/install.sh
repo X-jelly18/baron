@@ -214,6 +214,40 @@ setup_config() {
 	# access regardless. The user is created before this runs.
 	chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONF_DIR"
 	chmod 0750 "$CONF_DIR"
+	# Apply the domain/email collected by setup.sh to both fresh installs and
+	# existing configs, while preserving their routes and other settings.
+	if [ -n "${AYANA_CDN_DOMAIN:-}" ]; then
+		python3 - "$CONF" "$AYANA_CDN_DOMAIN" "${AYANA_CDN_EMAIL:-admin@$AYANA_CDN_DOMAIN}" <<'PYCFG'
+import json, os, sys, tempfile
+path, domain, email = sys.argv[1:]
+with open(path, encoding="utf-8") as f:
+    config = json.load(f)
+config["cdn_hosts"] = [domain]
+tls = config.setdefault("tls", {})
+if tls.get("mode", "acme") == "acme":
+    tls["email"] = email
+fd, tmp = tempfile.mkstemp(prefix=".config.json.", dir=os.path.dirname(path))
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, os.stat(path).st_mode & 0o777)
+    os.replace(tmp, path)
+finally:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+PYCFG
+		chown "$SERVICE_USER:$SERVICE_USER" "$CONF"
+		log "configured CDN domain $AYANA_CDN_DOMAIN"
+	fi
+	# CLI commands run as root can create the lock file. Keep it owned by the
+	# service account so panel edits can acquire it after installation.
+	if [ -e "$CONF.lock" ]; then
+		chown "$SERVICE_USER:$SERVICE_USER" "$CONF.lock"
+		chmod 0600 "$CONF.lock"
+	fi
 	if ! "$NEWBIN" check -no-dial -config "$CONF"; then
 		rm -f "$NEWBIN"
 		die "$CONF does not validate with $VERSION (details above). Nothing was replaced; the running service is untouched."

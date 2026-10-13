@@ -116,6 +116,8 @@ func (s *Server) servePanel(w http.ResponseWriter, r *http.Request, st *state) {
 		s.panelLogout(w, r, st)
 	case "/api/status":
 		s.panelStatus(w, r, st)
+	case "/api/series":
+		s.panelSeries(w, r, st)
 	case "/api/iplog":
 		s.panelIPLog(w, r, st)
 	case "/api/reload":
@@ -281,6 +283,17 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request, st *state) 
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(s.buildStatus())
+}
+
+// panelSeries returns the recent per-backend / per-domain / total throughput
+// history for the panel's live graphs. Read-only (no allow_control needed);
+// authentication required.
+func (s *Server) panelSeries(w http.ResponseWriter, r *http.Request, st *state) {
+	if _, _, ok := s.authed(r, st); !ok {
+		writeJSONError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.series.snapshot())
 }
 
 // panelIPLog returns the per-backend client-IP hit log, joined with any cached

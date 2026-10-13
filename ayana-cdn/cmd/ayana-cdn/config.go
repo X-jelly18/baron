@@ -931,9 +931,25 @@ func looksLikeBcrypt(s string) bool {
 
 // withConfigLock serializes CLI edits of the same config file.
 func withConfigLock(path string, fn func() error) error {
-	lf, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	lockPath := path + ".lock"
+	lf, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("lock config: %w", err)
+	}
+	// CLI operations are often run as root while the service/panel runs as the
+	// dedicated service user. If root creates the lock, align its ownership
+	// with the config file so the panel can open it on later requests.
+	if fi, statErr := os.Stat(path); statErr == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && os.Geteuid() == 0 {
+			if err := os.Chown(lockPath, int(st.Uid), int(st.Gid)); err != nil {
+				lf.Close()
+				return fmt.Errorf("set config lock ownership: %w", err)
+			}
+			if err := os.Chmod(lockPath, 0o600); err != nil {
+				lf.Close()
+				return fmt.Errorf("set config lock permissions: %w", err)
+			}
+		}
 	}
 	defer lf.Close()
 	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {

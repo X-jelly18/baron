@@ -115,6 +115,29 @@ func (r *statsRegistry) hostSnapshot() map[string]*hostStats {
 	return out
 }
 
+// backendBytes returns the cumulative up/down byte totals per backend, for the
+// throughput sampler (series.go).
+func (r *statsRegistry) backendBytes() map[string]bytePair {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]bytePair, len(r.backends))
+	for k, b := range r.backends {
+		out[k] = bytePair{up: b.bytesUp.Load(), down: b.bytesDown.Load()}
+	}
+	return out
+}
+
+// hostBytes returns the cumulative up/down byte totals per host bucket.
+func (r *statsRegistry) hostBytes() map[string]bytePair {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]bytePair, len(r.hosts))
+	for k, h := range r.hosts {
+		out[k] = bytePair{up: h.bytesUp.Load(), down: h.bytesDown.Load()}
+	}
+	return out
+}
+
 // ---- Prometheus text format ------------------------------------------------------
 
 type prom struct{ w *bufio.Writer }

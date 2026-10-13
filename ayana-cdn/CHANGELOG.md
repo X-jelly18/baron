@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.6.0
+
+### Added
+
+- **Redesigned web panel with live throughput graphs.** The dashboard has a new
+  look (design-token theming, dark and light, mobile-friendly) and a hero
+  **throughput area chart** of upload/download over the last few minutes, with a
+  hover readout. Each **domain** row carries a sparkline; each **backend** is now
+  a card showing its **total usage** (cumulative up/down bytes), **live rate**
+  (Mbps up/down), a live sparkline, and — on *Details* — a full per-backend
+  throughput chart alongside upstream health and response-class counts.
+- **Server-side throughput history.** A lightweight sampler records per-backend,
+  per-domain and total throughput into a bounded in-memory ring buffer (2 s
+  cadence, ~3 min window), so the graphs show real history the moment the panel
+  loads instead of only what has accrued since the tab opened. Exposed to the
+  panel via the authenticated `GET <panel>/api/series` endpoint. Memory is
+  bounded (one small ring per backend/domain, plus a hard key cap); everything is
+  per-process and resets on restart, like every other counter here. No new
+  configuration and no new dependencies.
+
 ## 2.5.1
 
 ### Changed

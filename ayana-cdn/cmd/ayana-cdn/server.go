@@ -22,7 +22,7 @@ import (
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
-var version = "2.5.1"
+var version = "2.6.0"
 
 const defaultPIDFile = "/run/ayana-cdn/pid"
 
@@ -62,6 +62,7 @@ type Server struct {
 	certs      *certTracker
 	panel      *panelAuth
 	geo        *geoResolver
+	series     *seriesStore
 
 	acme     *autocert.Manager
 	acmeSrc  certSource
@@ -108,6 +109,7 @@ func NewServer(cfgPath string, log *slog.Logger) (*Server, error) {
 		cfgPath: cfgPath, log: log, fixed: cfg, tlsMode: cfg.TLS.Mode,
 		stats: newStatsRegistry(), tunnels: newTunnelRegistry(), limiter: newIPLimiter(), udpLimiter: newIPLimiter(),
 		certs: newCertTracker(log), startTime: time.Now(), pidFile: defaultPIDFile,
+		series:    newSeriesStore(seriesInterval, seriesCap),
 		handedOff: make(chan struct{}), ready: make(chan struct{}),
 	}
 	switch cfg.TLS.Mode {
@@ -265,6 +267,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	go s.sweepLoop(ctx)
 	go s.geo.run(ctx)
+	go s.runSeries(ctx)
 	s.writePIDFile()
 	if err := s.signalReady(); err != nil {
 		s.log.Warn("could not signal readiness", "err", err)
