@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.6.1
+
+### Added
+
+- **`docs/PERFORMANCE.md`** documenting the throughput design and an honest
+  comparison to sing-box / Hiddify (what applies to a TLS edge and what does
+  not — splice, mux and TCP Brutal), plus how to measure.
+- **`BenchmarkPipeThroughput`** — a relay copy-loop throughput benchmark
+  (`go test -bench`). It confirms the current 32 KiB burst buffer is optimal
+  (~1.45 GB/s/core on loopback; larger buffers are measurably slower here), so
+  no buffer change was made.
+
+### Changed
+
+- **Panel stays smooth with many backends.** The dashboard no longer tears down
+  and rebuilds every domain row and backend card (with its SVG charts) on each
+  2 s refresh. Rows and cards are now built once and only their changing values
+  and sparklines are updated in place — sparkline SVG paths are created once and
+  only their geometry is redrawn. A full refresh with ~100 backends dropped from
+  ~32 ms to ~12–17 ms per tick (roughly 2–3× less work; far more on a phone),
+  so live updates no longer stutter when you run a lot of backends. Open add/edit
+  forms and expanded backend details are preserved across refreshes. No
+  functional or visual change.
+
+  Note: the edge itself was already fast here — install-time validation, startup,
+  config reload and the zero-downtime restart are all well under a tenth of a
+  second even at 100 backends; the cost was purely in the browser-side panel
+  re-render, which this addresses.
+
 ## 2.6.0
 
 ### Added

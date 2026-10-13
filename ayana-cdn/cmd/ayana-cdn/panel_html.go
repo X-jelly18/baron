@@ -296,31 +296,32 @@ function lastRate(pair){
 }
 function niceMax(v){if(!(v>0))return 1;var p=Math.pow(10,Math.floor(Math.log10(v))),f=v/p;var m=f<=1?1:f<=2?2:f<=5?5:10;return m*p}
 
-// sparkSVG draws a compact up(line)/down(area) throughput spark. vector-effect
-// keeps strokes crisp despite non-uniform viewBox scaling, so no measuring.
-function sparkSVG(pair){
-  var W=240,H=42,r=rates(pair),n=Math.max(r.up.length,r.down.length);
-  var box=el("div",null,"spark");
-  var s=svg("svg",{viewBox:"0 0 "+W+" "+H,preserveAspectRatio:"none"});
-  if(n<2){box.appendChild(s);return box}
+// A spark's SVG paths are created once (buildSpark) and only their geometry
+// (the d attribute) is updated on refresh (updateSpark), so a 2 s tick stays
+// cheap even with dozens of backends. vector-effect keeps strokes crisp despite
+// the non-uniform viewBox scaling, so nothing has to be measured.
+function pathLineD(a,x,y){var d="",i;for(i=0;i<a.length;i++)d+=(i?"L":"M")+x(i).toFixed(1)+" "+y(a[i]).toFixed(1);return d}
+function pathAreaD(a,x,y,H){var d="M"+x(0).toFixed(1)+" "+H.toFixed(1),i;for(i=0;i<a.length;i++)d+="L"+x(i).toFixed(1)+" "+y(a[i]).toFixed(1);return d+"L"+x(a.length-1).toFixed(1)+" "+H+"Z"}
+function buildSpark(box){
+  var W=240,H=42,s=svg("svg",{viewBox:"0 0 "+W+" "+H,preserveAspectRatio:"none"});
+  var area=svg("path",{fill:"var(--down)","fill-opacity":0.22,stroke:"none"});
+  var up=svg("path",{fill:"none",stroke:"var(--up)","stroke-width":1.5,"stroke-linejoin":"round","vector-effect":"non-scaling-stroke"});
+  var dn=svg("path",{fill:"none",stroke:"var(--down)","stroke-width":1.5,"stroke-linejoin":"round","vector-effect":"non-scaling-stroke"});
+  s.appendChild(area);s.appendChild(up);s.appendChild(dn);
+  box.textContent="";box.appendChild(s);
+  return {W:W,H:H,area:area,up:up,dn:dn};
+}
+function updateSpark(sp,pair){
+  var r=rates(pair),n=Math.max(r.up.length,r.down.length);
+  if(n<2){sp.area.setAttribute("d","");sp.up.setAttribute("d","");sp.dn.setAttribute("d","");return}
   var mx=niceMax(Math.max(Math.max.apply(null,r.up),Math.max.apply(null,r.down),0));
-  var x=function(i){return i*(W/(n-1))},y=function(v){return H-2-(v/mx)*(H-4)};
-  s.appendChild(areaPath(r.down,x,y,H,"var(--down)",0.22));
-  s.appendChild(linePath(r.up,x,y,"var(--up)",1.5));
-  s.appendChild(linePath(r.down,x,y,"var(--down)",1.5));
-  box.appendChild(s);
-  return box;
+  var x=function(i){return i*(sp.W/(n-1))},y=function(v){return sp.H-2-(v/mx)*(sp.H-4)};
+  sp.area.setAttribute("d",pathAreaD(r.down,x,y,sp.H));
+  sp.up.setAttribute("d",pathLineD(r.up,x,y));
+  sp.dn.setAttribute("d",pathLineD(r.down,x,y));
 }
-function linePath(a,x,y,color,wd){
-  var d="",i;for(i=0;i<a.length;i++)d+=(i?"L":"M")+x(i).toFixed(1)+" "+y(a[i]).toFixed(1);
-  return svg("path",{d:d,fill:"none",stroke:color,"stroke-width":wd,"stroke-linejoin":"round","vector-effect":"non-scaling-stroke"});
-}
-function areaPath(a,x,y,H,color,op){
-  var d="M"+x(0).toFixed(1)+" "+(H).toFixed(1),i;
-  for(i=0;i<a.length;i++)d+="L"+x(i).toFixed(1)+" "+y(a[i]).toFixed(1);
-  d+="L"+x(a.length-1).toFixed(1)+" "+H+"Z";
-  return svg("path",{d:d,fill:color,"fill-opacity":op,stroke:"none"});
-}
+function linePath(a,x,y,color,wd){return svg("path",{d:pathLineD(a,x,y),fill:"none",stroke:color,"stroke-width":wd,"stroke-linejoin":"round","vector-effect":"non-scaling-stroke"})}
+function areaPath(a,x,y,H,color,op){return svg("path",{d:pathAreaD(a,x,y,H),fill:color,"fill-opacity":op,stroke:"none"})}
 
 // drawChart renders a full area chart (grid + y labels + legend + hover) into
 // host. up=green area, down=blue area. Text lives in HTML overlays so the
@@ -477,98 +478,131 @@ function renderTiles(d){
   });
 }
 
+// Domains and backends are rendered incrementally: the row/card DOM is built
+// once (and rebuilt only when the SET of domains/backends changes), then each
+// refresh updates just the changing values and redraws the spark in place. This
+// keeps a 2 s refresh smooth even with dozens of backends.
+var domState={order:"",rows:{}};
 function renderDomains(d){
-  var wrap=$("domains");wrap.textContent="";
-  var t=el("table"),h=el("tr");
-  var cols=["Domain","Requests","Active","Rate ↑/↓","Total up/down","Last 3 min"];if(APP.control)cols.push("");
-  cols.forEach(function(c){h.appendChild(el("th",c))});t.appendChild(h);
-  (d.host_traffic||[]).forEach(function(ht){
-    var tr=el("tr"),rt=lastRate(SERIES.hosts[ht.host]);
-    tr.appendChild(el("td",ht.host));
-    tr.appendChild(el("td",ht.requests||0,"tnum"));
-    tr.appendChild(el("td",ht.active||0,"tnum"));
-    tr.appendChild(el("td","↑"+mbps(rt.up)+" ↓"+mbps(rt.down),"tnum"));
-    tr.appendChild(el("td",bytes(ht.bytes_up)+" / "+bytes(ht.bytes_down),"tnum"));
-    var sc=el("td",null,"sparkcell");sc.appendChild(sparkSVG(SERIES.hosts[ht.host]));tr.appendChild(sc);
-    if(APP.control){var td=el("td");if(ht.host!=="other"){var x=el("button","×","x");x.title="remove domain";(function(hn){x.addEventListener("click",function(){if(confirm("Remove domain "+hn+"?"))hostToggle("remove",hn)})})(ht.host);td.appendChild(x)}tr.appendChild(td)}
-    t.appendChild(tr);
+  var wrap=$("domains"),list=d.host_traffic||[];
+  var order=list.map(function(h){return h.host}).join("\u0001")+"|"+APP.control;
+  if(domState.order!==order){
+    wrap.textContent="";domState.rows={};
+    var t=el("table"),h=el("tr");
+    var cols=["Domain","Requests","Active","Rate ↑/↓","Total up/down","Last 3 min"];if(APP.control)cols.push("");
+    cols.forEach(function(c){h.appendChild(el("th",c))});t.appendChild(h);
+    list.forEach(function(ht){
+      var tr=el("tr"),refs={};
+      tr.appendChild(el("td",ht.host));
+      refs.req=el("td","","tnum");tr.appendChild(refs.req);
+      refs.act=el("td","","tnum");tr.appendChild(refs.act);
+      refs.rate=el("td","","tnum");tr.appendChild(refs.rate);
+      refs.tot=el("td","","tnum");tr.appendChild(refs.tot);
+      var sc=el("td",null,"sparkcell");refs.sp=el("div",null,"spark");sc.appendChild(refs.sp);tr.appendChild(sc);refs.spark=buildSpark(refs.sp);
+      if(APP.control){var td=el("td");if(ht.host!=="other"){var x=el("button","×","x");x.title="remove domain";(function(hn){x.addEventListener("click",function(){if(confirm("Remove domain "+hn+"?"))hostToggle("remove",hn)})})(ht.host);td.appendChild(x)}tr.appendChild(td)}
+      t.appendChild(tr);domState.rows[ht.host]=refs;
+    });
+    wrap.appendChild(t);domState.order=order;
+  }
+  list.forEach(function(ht){
+    var r=domState.rows[ht.host];if(!r)return;
+    var rt=lastRate(SERIES.hosts[ht.host]);
+    r.req.textContent=ht.requests||0;
+    r.act.textContent=ht.active||0;
+    r.rate.textContent="↑"+mbps(rt.up)+" ↓"+mbps(rt.down);
+    r.tot.textContent=bytes(ht.bytes_up)+" / "+bytes(ht.bytes_down);
+    updateSpark(r.spark,SERIES.hosts[ht.host]);
   });
-  wrap.appendChild(t);
 }
 
-function metric(parent,label,val){var m=el("div",null,"metric");m.appendChild(el("div",label,"l"));m.appendChild(el("div",String(val),"d"));parent.appendChild(m)}
-
-function renderBackends(d){
-  var wrap=$("backends");wrap.textContent="";
-  var grid=el("div",null,"bgrid");
-  (d.backends||[]).forEach(function(b){
-    var pair=SERIES.backends[b.name],rt=lastRate(pair);
-    var card=el("div",null,"bk"+(b.disabled?" dis":""));
-    // header
-    var hd=el("div",null,"bk-h");
-    hd.appendChild(el("span",b.name,"nm"));
-    hd.appendChild(el("span",b.listen?("udp "+b.listen):b.path,"pt"));
-    hd.appendChild(el("span",null,"sp"));
-    hd.appendChild(el("span",b.proto+(b.relay==="always"?" raw":""),"pill neutral"));
-    var anyUp=(b.upstreams||[]).some(function(u){return u.healthy});
-    if(b.disabled)hd.appendChild(el("span","disabled","pill off"));
-    else hd.appendChild(el("span",anyUp?"up":"down",anyUp?"pill up":"pill down"));
-    card.appendChild(hd);
-    // live rate bar
-    var rb=el("div",null,"ratebar");
-    var ru=el("div",null,"r");ru.appendChild(el("span",mbps(rt.up),"n up-c"));ru.appendChild(el("span","Mbps ↑ up","l"));
-    var rd=el("div",null,"r");rd.appendChild(el("span",mbps(rt.down),"n down-c"));rd.appendChild(el("span","Mbps ↓ down","l"));
-    rb.appendChild(ru);rb.appendChild(rd);card.appendChild(rb);
-    // sparkline
-    card.appendChild(sparkSVG(pair));
-    // totals + counters
-    var mt=el("div",null,"metrics");
-    metric(mt,"Total up",bytes(b.bytes_up));
-    metric(mt,"Total down",bytes(b.bytes_down));
-    metric(mt,"Open",b.tunnels_active);
-    metric(mt,"Total tunnels",b.tunnels_total);
-    metric(mt,"Failed",b.failures);
-    if(b.packets_up!=null||b.packets_down!=null)metric(mt,"Packets u/d",(b.packets_up||0)+" / "+(b.packets_down||0));
-    else metric(mt,"Cap rejects",b.capacity_rejections||0);
-    card.appendChild(mt);
-    // actions row
-    var act=el("div",null,"bk-act");
-    var det=el("button",expanded[b.name]?"Hide details":"Details","btn ghost sm");
-    (function(n){det.addEventListener("click",function(){expanded[n]=!expanded[n];renderBackends(lastStatus)})})(b.name);
-    act.appendChild(det);
-    if(APP.control){
-      var tg=el("button",b.disabled?"Enable":"Disable","btn sm"+(b.disabled?"":" danger"));
-      (function(n,dis){tg.addEventListener("click",function(){backendAction(dis?"enable":"disable",n)})})(b.name,b.disabled);
-      var ed=el("button","Edit","btn sm");(function(bb){ed.addEventListener("click",function(){backendForm(bb)})})(b);
-      var rm=el("button","Remove","btn sm");(function(n){rm.addEventListener("click",function(){if(confirm("Remove backend "+n+"?"))backendAction("remove",n)})})(b.name);
-      act.appendChild(tg);act.appendChild(ed);act.appendChild(rm);
-    }
-    card.appendChild(act);
-    // detail
-    if(expanded[b.name]){
-      var dt=el("div",null,"detail");
-      var ch=el("div",null,"chart");dt.appendChild(ch);
-      var ups=el("div",null,"ups");
-      (b.upstreams||[]).forEach(function(u){
-        var row=el("div",null,"u");
-        row.appendChild(el("span",u.healthy?"up":"down",u.healthy?"pill up":"pill down"));
-        row.appendChild(el("span",u.addr,"a"));
-        if(u.active)row.appendChild(el("span",u.active+" open","muted"));
-        ups.appendChild(row);
-        if(!u.healthy&&u.last_error)ups.appendChild(el("div",u.last_error,"muted"));
-      });
-      dt.appendChild(ups);
-      var cls=b.responses||{},keys=Object.keys(cls);
-      if(keys.length){var cb=el("div",null,"classes");keys.forEach(function(k){cb.appendChild(el("span",k+": "+cls[k],"cl"))});dt.appendChild(cb)}
-      card.appendChild(dt);
-      drawChart(ch,pair,140); // host is in the DOM tree being built; drawn again after append below for correct size
-      card._chartHost=ch;card._chartPair=pair;
-    }
-    grid.appendChild(card);
+function metricRef(parent,label){var m=el("div",null,"metric");m.appendChild(el("div",label,"l"));var d=el("div","","d");m.appendChild(d);parent.appendChild(m);return d}
+function statePill(b){
+  if(b.disabled)return {t:"disabled",c:"pill off"};
+  var anyUp=(b.upstreams||[]).some(function(u){return u.healthy});
+  return {t:anyUp?"up":"down",c:anyUp?"pill up":"pill down"};
+}
+function upRows(box,b){
+  box.textContent="";
+  (b.upstreams||[]).forEach(function(u){
+    var row=el("div",null,"u");
+    row.appendChild(el("span",u.healthy?"up":"down",u.healthy?"pill up":"pill down"));
+    row.appendChild(el("span",u.addr,"a"));
+    if(u.active)row.appendChild(el("span",u.active+" open","muted"));
+    box.appendChild(row);
+    if(!u.healthy&&u.last_error)box.appendChild(el("div",u.last_error,"muted"));
   });
-  wrap.appendChild(grid);
-  // redraw expanded detail charts now that cards are attached (so % height/overlays lay out)
-  Array.prototype.forEach.call(grid.children,function(card){if(card._chartHost)drawChart(card._chartHost,card._chartPair,140)});
+}
+function clsRow(box,b){
+  box.textContent="";
+  var cls=b.responses||{};Object.keys(cls).forEach(function(k){box.appendChild(el("span",k+": "+cls[k],"cl"))});
+}
+function buildCard(b){
+  var refs={},card=el("div",null,"bk"+(b.disabled?" dis":""));
+  var hd=el("div",null,"bk-h");
+  hd.appendChild(el("span",b.name,"nm"));
+  hd.appendChild(el("span",b.listen?("udp "+b.listen):b.path,"pt"));
+  hd.appendChild(el("span",null,"sp"));
+  hd.appendChild(el("span",b.proto+(b.relay==="always"?" raw":""),"pill neutral"));
+  var sp0=statePill(b);refs.state=el("span",sp0.t,sp0.c);hd.appendChild(refs.state);
+  card.appendChild(hd);
+  var rb=el("div",null,"ratebar");
+  var ru=el("div",null,"r");refs.rup=el("span","","n up-c");ru.appendChild(refs.rup);ru.appendChild(el("span","Mbps ↑ up","l"));
+  var rd=el("div",null,"r");refs.rdown=el("span","","n down-c");rd.appendChild(refs.rdown);rd.appendChild(el("span","Mbps ↓ down","l"));
+  rb.appendChild(ru);rb.appendChild(rd);card.appendChild(rb);
+  refs.sp=el("div",null,"spark");card.appendChild(refs.sp);refs.spark=buildSpark(refs.sp);
+  var mt=el("div",null,"metrics");
+  refs.tup=metricRef(mt,"Total up");refs.tdown=metricRef(mt,"Total down");
+  refs.open=metricRef(mt,"Open");refs.ttot=metricRef(mt,"Total tunnels");
+  refs.failed=metricRef(mt,"Failed");
+  refs.udp=(b.packets_up!=null||b.packets_down!=null);
+  refs.extra=metricRef(mt,refs.udp?"Packets u/d":"Cap rejects");
+  card.appendChild(mt);
+  var act=el("div",null,"bk-act");
+  var det=el("button",expanded[b.name]?"Hide details":"Details","btn ghost sm");
+  (function(n){det.addEventListener("click",function(){expanded[n]=!expanded[n];bkState.order="";renderBackends(lastStatus)})})(b.name);
+  act.appendChild(det);
+  if(APP.control){
+    var tg=el("button",b.disabled?"Enable":"Disable","btn sm"+(b.disabled?"":" danger"));
+    (function(n,dis){tg.addEventListener("click",function(){backendAction(dis?"enable":"disable",n)})})(b.name,b.disabled);
+    var ed=el("button","Edit","btn sm");(function(bb){ed.addEventListener("click",function(){backendForm(bb)})})(b);
+    var rm=el("button","Remove","btn sm");(function(n){rm.addEventListener("click",function(){if(confirm("Remove backend "+n+"?"))backendAction("remove",n)})})(b.name);
+    act.appendChild(tg);act.appendChild(ed);act.appendChild(rm);
+  }
+  card.appendChild(act);
+  if(expanded[b.name]){
+    var dt=el("div",null,"detail");
+    refs.chart=el("div",null,"chart");dt.appendChild(refs.chart);
+    refs.ups=el("div",null,"ups");dt.appendChild(refs.ups);
+    refs.cls=el("div",null,"classes");dt.appendChild(refs.cls);
+    card.appendChild(dt);
+  }
+  return {el:card,refs:refs};
+}
+function updateCard(c,b){
+  if(!c)return;var refs=c.refs,pair=SERIES.backends[b.name],rt=lastRate(pair);
+  var sp0=statePill(b);if(refs.state.textContent!==sp0.t){refs.state.textContent=sp0.t;refs.state.className=sp0.c}
+  refs.rup.textContent=mbps(rt.up);refs.rdown.textContent=mbps(rt.down);
+  refs.tup.textContent=bytes(b.bytes_up);refs.tdown.textContent=bytes(b.bytes_down);
+  refs.open.textContent=b.tunnels_active;refs.ttot.textContent=b.tunnels_total;refs.failed.textContent=b.failures;
+  refs.extra.textContent=refs.udp?((b.packets_up||0)+" / "+(b.packets_down||0)):(b.capacity_rejections||0);
+  updateSpark(refs.spark,pair);
+  if(refs.chart){drawChart(refs.chart,pair,140);upRows(refs.ups,b);clsRow(refs.cls,b)}
+}
+var bkState={order:"",cards:{}};
+function renderBackends(d){
+  var wrap=$("backends"),list=d.backends||[];
+  // The order key triggers a full rebuild. It includes every statically-rendered
+  // field (name, proto, relay, path/listen) so an Edit that changes them refreshes
+  // the header and the packets-vs-cap-rejects label; rate/totals/spark change every
+  // tick and are updated in place without a rebuild.
+  var order=list.map(function(b){return [b.name,b.proto,b.relay,b.listen||b.path,expanded[b.name]?1:0,b.disabled?1:0].join("~")}).join("\u0001")+"|"+APP.control;
+  if(bkState.order!==order){
+    wrap.textContent="";bkState.cards={};
+    var grid=el("div",null,"bgrid");
+    list.forEach(function(b){var c=buildCard(b);bkState.cards[b.name]=c;grid.appendChild(c.el)});
+    wrap.appendChild(grid);bkState.order=order;
+  }
+  list.forEach(function(b){updateCard(bkState.cards[b.name],b)}); // updates values + spark; detail charts drawn after attach
 }
 
 function renderIPSection(d){
