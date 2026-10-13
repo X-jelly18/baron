@@ -65,6 +65,7 @@ func (rg *ring) write(idx int, curUp, curDown uint64) {
 type seriesStore struct {
 	interval time.Duration
 	cap      int
+	epoch    string // random per process: lets a client detect a restart and refetch the full window
 
 	mu       sync.Mutex
 	tick     uint64 // number of samples taken; also the next write position via %cap
@@ -75,7 +76,7 @@ type seriesStore struct {
 
 func newSeriesStore(interval time.Duration, capn int) *seriesStore {
 	return &seriesStore{
-		interval: interval, cap: capn,
+		interval: interval, cap: capn, epoch: randToken(9),
 		total:    newRing(capn),
 		backends: map[string]*ring{},
 		hosts:    map[string]*ring{},
@@ -150,38 +151,59 @@ type seriesPair struct {
 
 type seriesDoc struct {
 	IntervalMS int64                 `json:"interval_ms"`
-	Points     int                   `json:"points"`
+	Points     int                   `json:"points"` // points per series in this response
+	Cap        int                   `json:"cap"`    // window length the client should keep
+	Tick       uint64                `json:"tick"`   // samples taken so far; send back as since=
+	Epoch      string                `json:"epoch"`  // process identity; send back as epoch=
+	Full       bool                  `json:"full"`   // true: the whole window; false: only points after since
 	Total      seriesPair            `json:"total"`
 	Backends   map[string]seriesPair `json:"backends"`
 	Hosts      map[string]seriesPair `json:"hosts"`
 }
 
-// snapshot returns the recorded history oldest-first for every key.
-func (st *seriesStore) snapshot() seriesDoc {
+// snapshot returns the whole recorded window, oldest first, for every key.
+func (st *seriesStore) snapshot() seriesDoc { return st.snapshotSince(0, "") }
+
+// snapshotSince returns only the samples taken after tick `since`, so a panel
+// that polls every interval downloads one point per series instead of the
+// whole window — the payload stays a few hundred bytes per backend no matter
+// how long the window is. It falls back to the full window when the client is
+// new (epoch mismatch), the process restarted (epoch changes), or the client
+// fell further behind than the window (e.g. a tab that was hidden for minutes).
+func (st *seriesStore) snapshotSince(since uint64, epoch string) seriesDoc {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	valid := int(min(st.tick, uint64(st.cap)))
+	valid := min(st.tick, uint64(st.cap))
+	full := epoch != st.epoch || since > st.tick || st.tick-since > valid
+	k := valid
+	if !full {
+		k = st.tick - since
+	}
 	order := func(rg *ring) seriesPair {
-		up := make([]uint64, valid)
-		down := make([]uint64, valid)
-		for i := 0; i < valid; i++ {
-			j := int((st.tick - uint64(valid) + uint64(i)) % uint64(st.cap))
+		up := make([]uint64, k)
+		down := make([]uint64, k)
+		for i := uint64(0); i < k; i++ {
+			j := int((st.tick - k + i) % uint64(st.cap))
 			up[i], down[i] = rg.up[j], rg.down[j]
 		}
 		return seriesPair{Up: up, Down: down}
 	}
 	doc := seriesDoc{
 		IntervalMS: st.interval.Milliseconds(),
-		Points:     valid,
+		Points:     int(k),
+		Cap:        st.cap,
+		Tick:       st.tick,
+		Epoch:      st.epoch,
+		Full:       full,
 		Total:      order(st.total),
 		Backends:   make(map[string]seriesPair, len(st.backends)),
 		Hosts:      make(map[string]seriesPair, len(st.hosts)),
 	}
-	for k, rg := range st.backends {
-		doc.Backends[k] = order(rg)
+	for name, rg := range st.backends {
+		doc.Backends[name] = order(rg)
 	}
-	for k, rg := range st.hosts {
-		doc.Hosts[k] = order(rg)
+	for name, rg := range st.hosts {
+		doc.Hosts[name] = order(rg)
 	}
 	return doc
 }

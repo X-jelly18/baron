@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -8,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -279,10 +281,7 @@ func (s *Server) panelStatus(w http.ResponseWriter, r *http.Request, st *state) 
 		writeJSONError(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	_ = enc.Encode(s.buildStatus())
+	writePanelJSON(w, r, http.StatusOK, s.buildStatus(), true)
 }
 
 // panelSeries returns the recent per-backend / per-domain / total throughput
@@ -293,7 +292,9 @@ func (s *Server) panelSeries(w http.ResponseWriter, r *http.Request, st *state) 
 		writeJSONError(w, http.StatusUnauthorized, "not authenticated")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.series.snapshot())
+	q := r.URL.Query()
+	since, _ := strconv.ParseUint(q.Get("since"), 10, 64)
+	writePanelJSON(w, r, http.StatusOK, s.series.snapshotSince(since, q.Get("epoch")), false)
 }
 
 // panelIPLog returns the per-backend client-IP hit log, joined with any cached
@@ -316,10 +317,10 @@ func (s *Server) panelIPLog(w http.ResponseWriter, r *http.Request, st *state) {
 			rows[i].Country, rows[i].City, rows[i].CC = info.country, info.city, info.cc
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	writePanelJSON(w, r, http.StatusOK, map[string]any{
 		"backend": name, "geo_enabled": s.geo.enabled(),
 		"total_ips": total, "overflow": overflow, "ips": rows,
-	})
+	}, false)
 }
 
 func (s *Server) panelReload(w http.ResponseWriter, r *http.Request, st *state) {
@@ -629,6 +630,63 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeJSONError(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]any{"ok": false, "error": msg})
+}
+
+// writePanelJSON writes a panel API response, gzip-compressed when the browser
+// accepts it. The panel polls every couple of seconds, often over mobile data;
+// status and IP-log JSON shrink 10-20x. Compression is safe here: these bodies
+// carry no secrets (the session lives in an HttpOnly cookie and the CSRF token
+// only in the dashboard HTML), so there is nothing for a BREACH-style length
+// oracle to recover.
+func writePanelJSON(w http.ResponseWriter, r *http.Request, code int, v any, indent bool) {
+	h := w.Header()
+	h.Set("Content-Type", "application/json")
+	h.Add("Vary", "Accept-Encoding")
+	var out io.Writer = w
+	var zw *gzip.Writer
+	if acceptsGzip(r) {
+		h.Set("Content-Encoding", "gzip")
+		zw = gzipWriters.Get().(*gzip.Writer)
+		zw.Reset(w)
+		out = zw
+	}
+	w.WriteHeader(code)
+	enc := json.NewEncoder(out)
+	if indent {
+		enc.SetIndent("", "  ")
+	}
+	_ = enc.Encode(v)
+	if zw != nil {
+		_ = zw.Close()
+		zw.Reset(io.Discard) // drop the reference to the response writer before pooling
+		gzipWriters.Put(zw)
+	}
+}
+
+// BestSpeed: these are small JSON bodies; the CPU-cheapest level already gets
+// most of the size win.
+var gzipWriters = sync.Pool{New: func() any {
+	zw, _ := gzip.NewWriterLevel(io.Discard, gzip.BestSpeed)
+	return zw
+}}
+
+// acceptsGzip reports whether Accept-Encoding lists gzip without q=0.
+func acceptsGzip(r *http.Request) bool {
+	for _, part := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+		enc, params, _ := strings.Cut(part, ";")
+		if !strings.EqualFold(strings.TrimSpace(enc), "gzip") {
+			continue
+		}
+		for _, p := range strings.Split(params, ";") {
+			if k, v, ok := strings.Cut(strings.TrimSpace(p), "="); ok && strings.EqualFold(k, "q") {
+				if q, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil && q <= 0 {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // ---- login throttle ---------------------------------------------------------

@@ -114,6 +114,8 @@ main{max-width:1200px;margin:0 auto;padding:18px}
 .tile .k{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
 .tile .v{font-size:22px;font-weight:700;margin-top:3px;word-break:break-word}
 .tile .s{color:var(--muted);font-size:12px;margin-top:2px}
+.tile.warn{border-color:color-mix(in srgb,var(--warn) 55%,var(--bd))}
+.tile.warn .v,.tile.warn .s{color:var(--warn)}
 
 .bar{display:flex;align-items:center;gap:10px;margin:26px 0 10px;flex-wrap:wrap}
 .bar h2{margin:0;font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;flex:1}
@@ -278,10 +280,41 @@ function mbps(v){v=Number(v)||0;if(v<0.01)return "0";return v<10?v.toFixed(2):(v
 function mbpsU(v){return mbps(v)+" Mbps"}
 $("csrfField").value=APP.csrf;
 
-var SERIES={interval_ms:2000,points:0,total:{up:[],down:[]},backends:{},hosts:{}};
+var SERIES={interval_ms:2000,points:0,cap:90,tick:0,epoch:"",total:{up:[],down:[]},backends:{},hosts:{}};
 var IVS=2;                 // sampling interval, seconds (from the series API)
 var ipSel=null;            // selected backend for the Client IPs section
 var expanded={};           // backend name -> detail chart open
+
+// mergeSeries folds an /api/series response into SERIES. Only the first load
+// (or a restart, or a long gap) carries the whole window; every other poll
+// carries just the points since our last tick, so the download stays tiny
+// however many backends there are. All series share one time axis, so a series
+// seen for the first time is left-padded with zeros to stay aligned.
+function zeros(n){var a=new Array(n);for(var i=0;i<n;i++)a[i]=0;return a}
+function appendPair(cur,inc,cap){
+  var u=(inc&&inc.up)||[],d=(inc&&inc.down)||[],i;
+  for(i=0;i<u.length;i++)cur.up.push(u[i]);
+  for(i=0;i<d.length;i++)cur.down.push(d[i]);
+  if(cur.up.length>cap)cur.up.splice(0,cur.up.length-cap);
+  if(cur.down.length>cap)cur.down.splice(0,cur.down.length-cap);
+}
+function mergeSeries(d){
+  if(!d||!d.total)return;
+  if(d.full||d.epoch!==SERIES.epoch){SERIES=d;return}
+  var k=(d.total.up||[]).length;
+  if(d.tick-SERIES.tick!==k){SERIES.epoch="";return} // out of step: ask for the full window next poll
+  var cap=d.cap||SERIES.cap||90,L=SERIES.total.up.length;
+  appendPair(SERIES.total,d.total,cap);
+  ["backends","hosts"].forEach(function(g){
+    var next={},src=d[g]||{};
+    Object.keys(src).forEach(function(name){
+      var cur=SERIES[g][name]||{up:zeros(L),down:zeros(L)};
+      appendPair(cur,src[name],cap);next[name]=cur;
+    });
+    SERIES[g]=next;
+  });
+  SERIES.tick=d.tick;SERIES.cap=cap;SERIES.interval_ms=d.interval_ms;SERIES.points=SERIES.total.up.length;
+}
 
 // rates(pair) converts a {up:[bytes],down:[bytes]} interval series into Mbps arrays.
 function rates(pair){
@@ -444,7 +477,7 @@ function backendForm(bk){
 function hostToggle(action,host){post("/api/host",{action:action,host:host},function(j){flash(j.ok?j.message:("error: "+j.error),j.ok);tick()})}
 function backendAction(action,name){post("/api/backend",{action:action,name:name},function(j){flash(j.ok?j.message:("error: "+j.error),j.ok);tick()})}
 
-function tile(parent,k,v,s){var c=el("div",null,"tile");c.appendChild(el("div",k,"k"));c.appendChild(el("div",String(v),"v"));if(s!=null)c.appendChild(el("div",String(s),"s"));parent.appendChild(c)}
+function tile(parent,k,v,s){var c=el("div",null,"tile");c.appendChild(el("div",k,"k"));c.appendChild(el("div",String(v),"v"));if(s!=null)c.appendChild(el("div",String(s),"s"));parent.appendChild(c);return c}
 
 function renderHero(d){
   var tr=lastRate(SERIES.total);
@@ -609,21 +642,29 @@ function renderIPSection(d){
   var ctl=$("ipCtl");
   var names=(d.backends||[]).map(function(b){return b.name});
   var s=$("ipBackend");
-  if(!s){s=document.createElement("select");s.id="ipBackend";s.addEventListener("change",function(){ipSel=s.value;loadIPLog()});ctl.appendChild(s)}
+  if(!s){s=document.createElement("select");s.id="ipBackend";s.addEventListener("change",function(){ipSel=s.value;loadIPLog(true)});ctl.appendChild(s)}
   var want=names.join("\u0001");
   if(s.getAttribute("data-k")!==want){
     s.textContent="";names.forEach(function(n){var o=document.createElement("option");o.value=n;o.textContent=n;s.appendChild(o)});
     s.setAttribute("data-k",want);
   }
+  var prev=ipSel;
   if(!ipSel||names.indexOf(ipSel)<0)ipSel=names[0]||null;
   if(ipSel)s.value=ipSel;
-  loadIPLog();
+  loadIPLog(ipSel!==prev);
 }
-function loadIPLog(){
+// The IP log changes slowly and is the largest panel response, so it is
+// refreshed every 10 s (or at once when another backend is picked) rather than
+// on every 2 s status poll.
+var ipLoadedAt=0;
+function loadIPLog(force){
   if(!ipSel){$("iplog").textContent="";$("ipNote").textContent="";return}
+  if(!force&&Date.now()-ipLoadedAt<10000)return;
+  ipLoadedAt=Date.now();
+  var want=ipSel; // a slow reply for a previously selected backend must not overwrite this one
   fetch(APP.base+"/api/iplog?backend="+encodeURIComponent(ipSel),{credentials:"same-origin",headers:{"Accept":"application/json"}})
   .then(function(r){if(r.status===401){location.href=APP.base+"/login";return null}return r.json()})
-  .then(function(j){if(j&&j.ips)renderIPLog(j)}).catch(function(){});
+  .then(function(j){if(j&&j.ips&&want===ipSel)renderIPLog(j)}).catch(function(){});
 }
 function renderIPLog(j){
   var note="distinct IPs: "+(j.total_ips||0)+(j.overflow?(" (+"+j.overflow+" older evicted)"):"");
@@ -665,23 +706,46 @@ function render(d){
   tile(rc,"Heap",bytes(rt.heap_inuse_bytes),"stacks "+bytes(rt.stack_inuse_bytes));
   tile(rc,"Sys mem",bytes(rt.sys_bytes));
   tile(rc,"Open FDs",rt.open_fds,"of "+rt.max_fds);
-  $("updated").textContent="updated "+new Date().toLocaleTimeString()+" · refreshes every "+IVS+"s";
+  if(rt.tcp_congestion){
+    var bbr=rt.tcp_congestion==="bbr";
+    var tc=tile(rc,"TCP congestion",rt.tcp_congestion+(bbr?" ✓":""),bbr?("qdisc "+(rt.default_qdisc||"?")):"BBR not active");
+    if(!bbr){tc.classList.add("warn");if(rt.net_advice)tc.title=rt.net_advice}
+  }
+  $("updated").textContent="updated "+new Date().toLocaleTimeString()+" · refreshes every "+IVS+"s · paused while this tab is hidden";
 }
 
+// One poll at a time: on a slow link a poll can outlast the interval, and
+// overlapping polls would both pile up and double-apply incremental series.
+// Each poll is bounded: a request black-holed by a dead connection (e.g. a NAT
+// that dropped the flow) is aborted after POLL_TIMEOUT so the guard always
+// releases, and an aborted poll can never be merged late.
+var busy=false,POLL_TIMEOUT=10000;
 function tick(){
+  if(busy)return;
+  busy=true;
+  var ac=window.AbortController?new AbortController():null,sig=ac?ac.signal:undefined;
+  var to=setTimeout(function(){if(ac)ac.abort()},POLL_TIMEOUT);
+  var surl=APP.base+"/api/series?since="+encodeURIComponent(SERIES.tick||0)+"&epoch="+encodeURIComponent(SERIES.epoch||"");
   Promise.all([
-    fetch(APP.base+"/api/status",{credentials:"same-origin",headers:{"Accept":"application/json"}}),
-    fetch(APP.base+"/api/series",{credentials:"same-origin",headers:{"Accept":"application/json"}})
+    fetch(APP.base+"/api/status",{credentials:"same-origin",headers:{"Accept":"application/json"},signal:sig}),
+    fetch(surl,{credentials:"same-origin",headers:{"Accept":"application/json"},signal:sig})
   ]).then(function(res){
     if(res[0].status===401||res[1].status===401){location.href=APP.base+"/login";return}
     return Promise.all([res[0].json(),res[1].json()]);
   }).then(function(j){
     if(!j)return;
-    if(j[1]){SERIES=j[1];IVS=(SERIES.interval_ms||2000)/1000}
+    if(j[1]){mergeSeries(j[1]);IVS=(SERIES.interval_ms||2000)/1000}
     if(j[0]){renderControls();render(j[0])}
-  }).catch(function(e){flash("status error: "+e,false)});
+  }).catch(function(e){flash(e&&e.name==="AbortError"?"refresh timed out; retrying":"status error: "+e,false)})
+  .then(function(){clearTimeout(to);busy=false});
 }
+// Polling stops while the tab is hidden (saves mobile data and battery) and
+// resumes with an immediate refresh when it is shown again.
+var timer=null;
+function startPolling(){if(!timer)timer=setInterval(tick,2000)}
+function stopPolling(){if(timer){clearInterval(timer);timer=null}}
+document.addEventListener("visibilitychange",function(){if(document.hidden)stopPolling();else{tick();startPolling()}});
 renderControls();
 tick();
-setInterval(tick,2000);
+if(!document.hidden)startPolling(); // a tab opened in the background starts polling when first shown
 `

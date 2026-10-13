@@ -1,8 +1,13 @@
 package main
 
 import (
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -177,5 +182,140 @@ func TestPanelSeriesEndpoint(t *testing.T) {
 	}
 	if doc.Backends == nil || doc.Hosts == nil {
 		t.Fatal("series doc should always include backends/hosts maps")
+	}
+}
+
+func TestSeriesSinceIncremental(t *testing.T) {
+	reg := newStatsRegistry()
+	st := newSeriesStore(time.Second, 8)
+	cum := uint64(0)
+	setBytes(reg, "x", 0, 0)
+	st.sample(reg) // tick -> 1
+	for _, v := range []uint64{10, 20, 30, 40} {
+		cum += v
+		setBytes(reg, "x", cum, 0)
+		st.sample(reg) // ticks -> 2..5
+	}
+	full := st.snapshot()
+	if !full.Full || full.Tick != 5 || full.Points != 5 || full.Epoch == "" || full.Cap != 8 {
+		t.Fatalf("full snapshot: %+v", full)
+	}
+	inc := st.snapshotSince(3, full.Epoch)
+	if inc.Full || inc.Points != 2 || inc.Tick != 5 {
+		t.Fatalf("incremental: full=%v points=%d tick=%d", inc.Full, inc.Points, inc.Tick)
+	}
+	eqU(t, inc.Backends["x"].Up, 30, 40)
+	eqU(t, inc.Total.Up, 30, 40)
+
+	none := st.snapshotSince(5, full.Epoch) // nothing new since the last poll
+	if none.Full || none.Points != 0 || len(none.Backends["x"].Up) != 0 {
+		t.Fatalf("no-new: %+v", none)
+	}
+	if _, ok := none.Backends["x"]; !ok {
+		t.Fatal("an incremental response must still list every key")
+	}
+}
+
+func TestSeriesSinceFallsBackToFull(t *testing.T) {
+	reg := newStatsRegistry()
+	st := newSeriesStore(time.Second, 4)
+	setBytes(reg, "x", 0, 0)
+	for i := 0; i < 10; i++ { // tick 10, window holds 4
+		setBytes(reg, "x", uint64(i*100), 0)
+		st.sample(reg)
+	}
+	ep := st.snapshot().Epoch
+	cases := map[string]seriesDoc{
+		"new client (no epoch)":     st.snapshotSince(0, ""),
+		"process restarted (epoch)": st.snapshotSince(9, "some-other-process"),
+		"since ahead of tick":       st.snapshotSince(50, ep),
+		"fell behind the window":    st.snapshotSince(2, ep),
+	}
+	for name, d := range cases {
+		if !d.Full || d.Points != 4 {
+			t.Errorf("%s: want full window of 4, got full=%v points=%d", name, d.Full, d.Points)
+		}
+	}
+	if d := st.snapshotSince(6, ep); d.Full || d.Points != 4 { // exactly one window behind: still incremental
+		t.Errorf("since=tick-cap: want incremental 4 points, got full=%v points=%d", d.Full, d.Points)
+	}
+}
+
+func TestAcceptsGzip(t *testing.T) {
+	for hdr, want := range map[string]bool{
+		"":                     false,
+		"gzip":                 true,
+		"gzip, deflate, br":    true,
+		"br;q=1.0, gzip;q=0.8": true,
+		"GZIP":                 true,
+		"gzip;q=0":             false,
+		"gzip; q=0.0":          false,
+		"deflate, br":          false,
+		"x-gzip":               false,
+	} {
+		r, _ := http.NewRequest("GET", "/", nil)
+		if hdr != "" {
+			r.Header.Set("Accept-Encoding", hdr)
+		}
+		if got := acceptsGzip(r); got != want {
+			t.Errorf("Accept-Encoding %q: got %v want %v", hdr, got, want)
+		}
+	}
+}
+
+// The panel API is gzip-compressed for browsers that accept it, and the series
+// endpoint honours since/epoch.
+func TestPanelGzipAndIncrementalSeries(t *testing.T) {
+	e := panelEdge(t, false)
+	c := panelClient(t, e)
+	login(t, c, testPanelUser, testPanelPass).Body.Close()
+
+	get := func(path string, gz bool) (*http.Response, []byte) {
+		t.Helper()
+		req, _ := http.NewRequest("GET", panelURL(path), nil)
+		if gz {
+			req.Header.Set("Accept-Encoding", "gzip") // set by hand: the transport then leaves the body compressed
+		}
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var rd io.Reader = resp.Body
+		if resp.Header.Get("Content-Encoding") == "gzip" {
+			zr, err := gzip.NewReader(resp.Body)
+			if err != nil {
+				t.Fatalf("%s: bad gzip: %v", path, err)
+			}
+			rd = zr
+		}
+		body, _ := io.ReadAll(rd)
+		return resp, body
+	}
+
+	resp, body := get("/api/status", true)
+	if resp.Header.Get("Content-Encoding") != "gzip" || !strings.Contains(resp.Header.Get("Vary"), "Accept-Encoding") {
+		t.Fatalf("status not gzipped: CE=%q Vary=%q", resp.Header.Get("Content-Encoding"), resp.Header.Get("Vary"))
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil || doc["version"] != version {
+		t.Fatalf("gzipped status does not decode: %v", err)
+	}
+	if resp, _ := get("/api/status", false); resp.Header.Get("Content-Encoding") != "" {
+		t.Fatal("a client without Accept-Encoding: gzip must get an uncompressed body")
+	}
+
+	_, body = get("/api/series", true)
+	var first seriesDoc
+	if err := json.Unmarshal(body, &first); err != nil || !first.Full || first.Epoch == "" {
+		t.Fatalf("first series poll should be the full window with an epoch: %v %+v", err, first)
+	}
+	_, body = get("/api/series?since="+strconv.FormatUint(first.Tick, 10)+"&epoch="+url.QueryEscape(first.Epoch), true)
+	var next seriesDoc
+	if err := json.Unmarshal(body, &next); err != nil || next.Full {
+		t.Fatalf("follow-up poll should be incremental: %v %+v", err, next)
+	}
+	if uint64(next.Points) != next.Tick-first.Tick {
+		t.Fatalf("incremental points %d != tick delta %d", next.Points, next.Tick-first.Tick)
 	}
 }

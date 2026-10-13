@@ -800,6 +800,16 @@ func cmdCheck(args []string) error {
 		fmt.Printf("  dead peers dropped after ~%s of silence (client_keepalive %s + dead_peer %s)\n",
 			d.Round(time.Second), cfg.Timeouts.ClientKeepAlive.D(), cfg.Timeouts.DeadPeer.D())
 	}
+	if nt := readNetTuning("/"); nt.congestion != "" {
+		qd := nt.qdisc
+		if qd == "" {
+			qd = "?"
+		}
+		fmt.Printf("  tcp congestion control %s, default qdisc %s\n", nt.congestion, qd)
+		if a := nt.advice(); a != "" {
+			fmt.Printf("  warning: %s\n", a)
+		}
+	}
 	if udp := udpBackendCount(cfg); udp > 0 {
 		fmt.Printf("  %d udp backend(s); global session cap %d, udp_idle %s, udp_reply %s\n",
 			udp, effectiveMaxUDPSessions(cfg.Limits.MaxUDPSessions), cfg.Timeouts.UDPIdle.D(), cfg.Timeouts.UDPReply.D())

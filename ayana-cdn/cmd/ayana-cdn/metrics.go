@@ -406,12 +406,16 @@ type backendStatus struct {
 }
 
 type runtimeStatus struct {
-	Goroutines int    `json:"goroutines"`
-	HeapInuse  uint64 `json:"heap_inuse_bytes"`
-	StackInuse uint64 `json:"stack_inuse_bytes"`
-	Sys        uint64 `json:"sys_bytes"`
-	OpenFDs    int    `json:"open_fds"`
-	MaxFDs     uint64 `json:"max_fds"`
+	Goroutines    int    `json:"goroutines"`
+	HeapInuse     uint64 `json:"heap_inuse_bytes"`
+	StackInuse    uint64 `json:"stack_inuse_bytes"`
+	Sys           uint64 `json:"sys_bytes"`
+	OpenFDs       int    `json:"open_fds"`
+	MaxFDs        uint64 `json:"max_fds"`
+	TCPCongestion string `json:"tcp_congestion,omitempty"` // kernel default, e.g. "bbr"
+	DefaultQdisc  string `json:"default_qdisc,omitempty"`  // e.g. "fq"
+	BBRAvailable  bool   `json:"bbr_available"`
+	NetAdvice     string `json:"net_advice,omitempty"` // set when BBR is not in force
 }
 
 func (s *Server) buildStatus() statusDoc {
@@ -493,8 +497,10 @@ func (s *Server) buildStatus() statusDoc {
 	sortBackends(d.Backends, order)
 	var ms runtime.MemStats
 	runtime.ReadMemStats(&ms)
+	nt := readNetTuning("/")
 	d.Runtime = runtimeStatus{Goroutines: runtime.NumGoroutine(), HeapInuse: ms.HeapInuse, StackInuse: ms.StackInuse, Sys: ms.Sys,
-		OpenFDs: countOpenFDs(), MaxFDs: nofileLimit()}
+		OpenFDs: countOpenFDs(), MaxFDs: nofileLimit(),
+		TCPCongestion: nt.congestion, DefaultQdisc: nt.qdisc, BBRAvailable: nt.bbrAvailable(), NetAdvice: nt.advice()}
 	return d
 }
 

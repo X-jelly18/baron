@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.6.2
+
+### Changed
+
+- **The panel downloads ~30-40x less per refresh.** Each 2 s poll used to
+  re-download the full 3-minute graph history for every backend, the whole
+  status document and the client-IP log — about 66 KB per poll at 20 backends
+  and 225 KB at 100, i.e. a continuous 32-110 KB/s on a phone, enough to make
+  the dashboard lag on a weak mobile link. Now:
+  - `GET <panel>/api/series?since=<tick>&epoch=<id>` returns only the samples
+    taken since the last poll (one point per series); the whole window is sent
+    only on first load, after a restart, or after a gap longer than the window.
+  - Panel API responses are gzip-compressed when the browser accepts it
+    (status shrinks ~10x). The bodies carry no secrets, so this is BREACH-safe.
+  - The client-IP log refreshes every 10 s (or at once when you pick another
+    backend) instead of every 2 s.
+  - Polling pauses while the tab is hidden (including a tab opened in the
+    background) and resumes with an immediate refresh. Polls never overlap,
+    and each is bounded by a 10 s timeout, so a request stuck on a dead
+    connection cannot freeze the dashboard. A slow IP-log reply for a backend
+    you just switched away from can no longer overwrite the one now selected.
+  Result: ~2.1 KB per poll at 20 backends (1 KB/s), ~5.5 KB at 100 (2.7 KB/s).
+
+### Added
+
+- **TCP congestion-control check.** The panel's Runtime section and
+  `ayana-cdn check` now show the kernel's TCP congestion control and default
+  qdisc, and warn (with the fix) when BBR is not actually in force — the
+  installer asks for BBR, but some hosts (containers, images that reset sysctl
+  at boot) silently keep cubic, which costs a lot of throughput to clients on
+  lossy mobile links. Also exposed in the status JSON as
+  `runtime.tcp_congestion`, `default_qdisc`, `bbr_available`, `net_advice`.
+
 ## 2.6.1
 
 ### Added

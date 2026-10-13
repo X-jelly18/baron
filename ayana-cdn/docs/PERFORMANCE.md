@@ -46,6 +46,22 @@ the installer:
 on by default (Go), so interactive tunnels (e.g. SSH-over-WebSocket) are not
 delayed by Nagle.
 
+**Is BBR actually on?** The installer asks for BBR + fq, but some hosts
+(container VPSes, images that reset sysctl at boot) silently keep cubic. The
+panel's Runtime section and `ayana-cdn check` show the congestion control in
+force and warn with the fix when it is not BBR.
+
+## The web panel
+
+The panel polls every 2 s, often over mobile data, so its payload is kept
+independent of the graph window: `/api/series?since=&epoch=` returns only the
+samples since the previous poll (the full window only on first load, after a
+restart or after a long gap), API responses are gzip-compressed, the client-IP
+log refreshes every 10 s, and polling pauses while the tab is hidden. Per poll
+that is about 2 KB at 20 backends and 5.5 KB at 100 (it was 66 KB and 225 KB).
+Rows and backend cards are built once and updated in place, so a refresh with
+100 backends costs ~12-17 ms of script time instead of ~32 ms.
+
 ## How this compares to sing-box / Hiddify
 
 sing-box is a proxy *platform* (many protocols, multiplexing, a client and a
