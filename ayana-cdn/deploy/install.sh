@@ -215,14 +215,23 @@ setup_config() {
 	chown -R "$SERVICE_USER":"$SERVICE_USER" "$CONF_DIR"
 	chmod 0750 "$CONF_DIR"
 	# Apply the domain/email collected by setup.sh to both fresh installs and
-	# existing configs, while preserving their routes and other settings.
+	# existing configs, while preserving their routes and other settings. The
+	# domain is added as the primary one; domains already configured (e.g. added
+	# from the web panel) are kept, not replaced.
 	if [ -n "${AYANA_CDN_DOMAIN:-}" ]; then
 		python3 - "$CONF" "$AYANA_CDN_DOMAIN" "${AYANA_CDN_EMAIL:-admin@$AYANA_CDN_DOMAIN}" <<'PYCFG'
 import json, os, sys, tempfile
 path, domain, email = sys.argv[1:]
 with open(path, encoding="utf-8") as f:
     config = json.load(f)
-config["cdn_hosts"] = [domain]
+def norm(h):
+    return str(h or "").strip().lower().rstrip(".")
+hosts = [norm(domain)]
+legacy = [config.pop("cdn_host")] if config.get("cdn_host") else []
+for h in legacy + list(config.get("cdn_hosts") or []):
+    if norm(h) and norm(h) not in hosts:
+        hosts.append(norm(h))
+config["cdn_hosts"] = hosts
 tls = config.setdefault("tls", {})
 if tls.get("mode", "acme") == "acme":
     tls["email"] = email
@@ -241,6 +250,8 @@ finally:
 PYCFG
 		chown "$SERVICE_USER:$SERVICE_USER" "$CONF"
 		log "configured CDN domain $AYANA_CDN_DOMAIN"
+		others=$(python3 -c 'import json, sys; print(" ".join(json.load(open(sys.argv[1])).get("cdn_hosts", [])[1:]))' "$CONF")
+		[ -z "$others" ] || log "also kept the domains already configured: $others (remove any you no longer use in the panel's Domains section)"
 	fi
 	# CLI commands run as root can create the lock file. Keep it owned by the
 	# service account so panel edits can acquire it after installation.

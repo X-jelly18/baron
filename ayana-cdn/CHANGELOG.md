@@ -1,5 +1,24 @@
 # Changelog
 
+## 2.6.3
+
+### Fixed
+
+- **Upgrading no longer drops the domains you added in the panel.**
+  `sudo ./setup.sh --keep-config` still asked for a domain and then replaced
+  `cdn_hosts` with that single domain, so every domain added from the web
+  panel's Domains section was silently removed on upgrade. With
+  `--keep-config` on an existing install, setup.sh now asks nothing and leaves
+  the domains and the ACME email as they are (set `AYANA_CDN_DOMAIN` to add one
+  anyway).
+- **Entering a domain in setup.sh adds it instead of replacing the others.**
+  The domain you type becomes the primary (first) entry of `cdn_hosts`; domains
+  already configured are kept after it, and the installer lists them so you can
+  remove any you no longer use from the panel. A legacy `cdn_host` entry is
+  folded in, and re-entering an existing domain just moves it to the front.
+- `AYANA_CDN_DOMAIN` given in upper case is accepted (lower-cased), as typed
+  input already was.
+
 ## 2.6.2
 
 ### Changed

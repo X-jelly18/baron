@@ -5,7 +5,7 @@
 #
 #   sudo ./setup.sh                    interactive: prompts for the routes
 #   sudo ./setup.sh --routes FILE      apply a routes.json instead of prompting
-#   sudo ./setup.sh --keep-config      leave the routes as they are
+#   sudo ./setup.sh --keep-config      upgrade only: keep the domains, email and routes
 #   (other options are passed to deploy/install.sh, e.g. --test --no-sysctl)
 #
 # Routes you enter are saved to /etc/ayana-cdn/routes.json.
@@ -44,24 +44,31 @@ ask() { # ask VAR "prompt"
 
 # Ask for the public TLS/CDN hostname before installation. Environment variables
 # also allow unattended deployments without silently using the package default.
+# An upgrade with --keep-config changes nothing: no prompt, and the domains
+# (including any added from the web panel) and the ACME email stay as they are.
 DOMAIN=${AYANA_CDN_DOMAIN:-}
+DOMAIN=${DOMAIN,,}
 EMAIL=${AYANA_CDN_EMAIL:-}
-if [ -z "$DOMAIN" ]; then
-	while true; do
-		ask DOMAIN "Domain for this CDN (e.g. cdn.example.com): "
-		DOMAIN=${DOMAIN,,}
-		if [[ "$DOMAIN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$ ]]; then break; fi
-		echo "Enter a hostname only (no https://, port, path, or IP address)." >&2
-		DOMAIN=""
-	done
+if [ "$mode" = keep ] && [ -f "$CONF" ] && [ -z "$DOMAIN" ]; then
+	echo "==> --keep-config: keeping the domains and email in $CONF"
+else
+	if [ -z "$DOMAIN" ]; then
+		while true; do
+			ask DOMAIN "Domain for this CDN (e.g. cdn.example.com): "
+			DOMAIN=${DOMAIN,,}
+			if [[ "$DOMAIN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$ ]]; then break; fi
+			echo "Enter a hostname only (no https://, port, path, or IP address)." >&2
+			DOMAIN=""
+		done
+	fi
+	[[ "$DOMAIN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$ ]] || { echo "invalid AYANA_CDN_DOMAIN hostname: $DOMAIN" >&2; exit 1; }
+	if [ -z "$EMAIL" ]; then
+		ask EMAIL "ACME certificate email [admin@$DOMAIN]: " || exit 1
+		EMAIL=${EMAIL:-admin@$DOMAIN}
+	fi
+	[[ "$EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || { echo "invalid email address: $EMAIL" >&2; exit 1; }
+	export AYANA_CDN_DOMAIN="$DOMAIN" AYANA_CDN_EMAIL="$EMAIL"
 fi
-[[ "$DOMAIN" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}$ ]] || { echo "invalid AYANA_CDN_DOMAIN hostname: $DOMAIN" >&2; exit 1; }
-if [ -z "$EMAIL" ]; then
-	ask EMAIL "ACME certificate email [admin@$DOMAIN]: " || exit 1
-	EMAIL=${EMAIL:-admin@$DOMAIN}
-fi
-[[ "$EMAIL" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || { echo "invalid email address: $EMAIL" >&2; exit 1; }
-export AYANA_CDN_DOMAIN="$DOMAIN" AYANA_CDN_EMAIL="$EMAIL"
 
 "$DIR/deploy/install.sh" "${args[@]}"
 

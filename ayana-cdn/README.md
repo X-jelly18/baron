@@ -86,16 +86,20 @@ unzip ayana-cdn.zip && cd ayana-cdn
 sudo ./setup.sh          # install or upgrade, apply routes.json, probe upstreams, show status
 ```
 
-`setup.sh` runs the installer (add `--test` to run the test suite first), then
-asks for the routes one at a time: the path clients use, the target
-(`http://IP-or-host[:port]`, `https://…` for TLS, several separated by commas
-for failover), and optionally the Host header to send. It shows the routes it
+`setup.sh` asks for the domain (and the ACME email), runs the installer (add
+`--test` to run the test suite first), then asks for the routes one at a
+time: the path clients use, the target (`http://IP-or-host[:port]`,
+`https://…` for TLS, several separated by commas for failover), and optionally
+the Host header to send. It shows the routes it
 is about to apply, validates them with the same code that applies them,
 probes every upstream, and prints the client payload for each route. The
 entered routes are saved to `/etc/ayana-cdn/routes.json`; rerunning
 `setup.sh` shows the current routes and keeps them if you leave the first
-path empty. `--routes FILE` applies a file without prompting, `--keep-config`
-skips the routes step.
+path empty. The domain you enter becomes the primary one; domains already
+configured (e.g. added from the panel) are kept. `--routes FILE` applies a
+file without prompting. To upgrade without changing anything, use
+`sudo ./setup.sh --keep-config`: it asks nothing and keeps the domains, the
+email and the routes as they are.
 
 The routes file uses the same format as the Cloud Run `http-proxy` relay it
 replaces, path prefix to target, with the same semantics: the path is
