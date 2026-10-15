@@ -1,0 +1,13 @@
+{
+  "cdn_hosts": ["cdn.example.com", "cdn.example.net"],
+  "strict_host": false,
+  "tls": {
+    "mode": "files",
+    "cert_file": "/etc/ayana-cdn/tls/fullchain.pem",
+    "key_file": "/etc/ayana-cdn/tls/privkey.pem",
+    "min_version": "1.2"
+  },
+  "backends": [
+    { "name": "native1", "upstream": "native1.example.com:443" }
+  ]
+}

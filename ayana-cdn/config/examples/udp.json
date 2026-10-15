@@ -1,0 +1,11 @@
+{
+  "cdn_hosts": ["cdn.example.com"],
+  "tls": { "mode": "acme", "email": "admin@example.com" },
+  "timeouts": { "udp_idle": "60s", "udp_reply": "15s", "dead_peer": "30s" },
+  "limits": { "max_conns_per_ip": 256, "max_udp_sessions": 20000 },
+  "backends": [
+    { "name": "wg",  "proto": "udp", "listen": ":51820", "upstream": "127.0.0.1:51820", "idle_timeout": "3m" },
+    { "name": "dns", "proto": "udp", "listen": ":53",    "upstreams": ["10.0.0.10:53", "10.0.0.11:53"], "lb": "hash" },
+    { "name": "ssh", "proto": "ws",  "upstream": "127.0.0.1:2222", "relay": "always" }
+  ]
+}
