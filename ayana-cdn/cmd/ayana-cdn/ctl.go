@@ -132,8 +132,9 @@ func splitList(s string) []string {
 
 const backendUsage = `usage:
   ayana-cdn backend ls [-json]
-  ayana-cdn backend add <name> <host:port>[,<host:port>...] [flags]
-  ayana-cdn backend add <name> <host:port> -proto udp -listen :PORT   (a UDP backend on its own port)
+  ayana-cdn backend add <name> <host:port> [flags]     (clients use path /<name>/)
+  ayana-cdn backend add <name> <host:port>[,<host:port>...] -proto udp -listen :PORT
+                                                       (a UDP backend on its own port)
   ayana-cdn backend set <name> [flags]
   ayana-cdn backend rm <name>
   ayana-cdn backend enable|disable <name>
@@ -144,14 +145,16 @@ flags for add/set (any order, before or after the arguments):
   -tls[=false]         TLS to the backend (default follows -proto)
   -strip[=false]       remove /<name> from the path (default true)
   -insecure            do not verify the backend certificate
-  -lb POLICY           least_conn (default) | round_robin | first
+  -lb POLICY           udp only: hash (default) | least_conn | round_robin | first
   -relay MODE          upgrade (default) | always (ws/wss: raw relay from the first byte)
   -max-conns N         cap concurrent tunnels or udp sessions (0 = no cap)
   -idle-timeout DUR    close idle tunnels or udp sessions after DUR
   -check TYPE          health check: tcp | tls | http | ws | off
   -check-path PATH     -check-interval DUR     -check-expect STATUS
-  -upstreams LIST      (set only) replace the upstream list
-  -disabled[=false]    -no-reload    -config FILE`
+  -upstreams LIST      (set only) replace the server (udp: a comma-separated list)
+  -disabled[=false]    -no-reload    -config FILE
+A path connects to exactly one server: no load balancing, no failover. To use
+several servers, give each its own path (backend add s1 a:443; backend add s2 b:443).`
 
 type backendFlags struct {
 	upstreams, host, proto, listen, lb, relay, check, checkPath optString
@@ -163,7 +166,7 @@ type backendFlags struct {
 
 func (f *backendFlags) register(fs *flag.FlagSet, withUpstreams bool) {
 	if withUpstreams {
-		fs.Var(&f.upstreams, "upstreams", "replace the upstream list (comma-separated host:port)")
+		fs.Var(&f.upstreams, "upstreams", "replace the server host:port (udp: comma-separated list)")
 	}
 	fs.Var(&f.host, "host", "Host header and TLS SNI sent to the backend")
 	fs.Var(&f.proto, "proto", "wss | ws | https | http | sse | udp")
@@ -172,7 +175,7 @@ func (f *backendFlags) register(fs *flag.FlagSet, withUpstreams bool) {
 	fs.Var(&f.strip, "strip", "strip /<name> from the path")
 	fs.Var(&f.insecure, "insecure", "do not verify the backend certificate")
 	fs.Var(&f.disabled, "disabled", "answer 503 instead of proxying")
-	fs.Var(&f.lb, "lb", "least_conn | round_robin | first")
+	fs.Var(&f.lb, "lb", "udp only: hash | least_conn | round_robin | first")
 	fs.Var(&f.relay, "relay", "upgrade | always")
 	fs.Var(&f.maxConns, "max-conns", "cap concurrent tunnels (0 = no cap)")
 	fs.Var(&f.idle, "idle-timeout", "close idle tunnels after this long")
@@ -195,9 +198,13 @@ func (f *backendFlags) apply(b *Backend) {
 		b.Listen = f.listen.v
 	}
 	if f.proto.set {
+		wasUDP := normProto(b.Proto) == "udp"
 		b.Proto = strings.ToLower(f.proto.v)
 		if !f.tlsF.set {
 			b.TLS = nil // follow the new proto instead of a stale explicit value
+		}
+		if !f.lb.set && wasUDP != (normProto(b.Proto) == "udp") {
+			b.LB = "" // a udp policy means nothing on a path, and the reverse
 		}
 	}
 	if f.tlsF.set {
@@ -302,6 +309,31 @@ func editConfig(path string, noReload bool, fn func(*Config) (string, error)) er
 	return nil
 }
 
+// enforcePath refuses CLI input that would let a path reach anything but its
+// one server: several servers (when this command sets them) or an -lb policy.
+// A balancing policy left by an older version is dropped from the file once
+// the path has a single server; it means the same as no policy now.
+func (f *backendFlags) enforcePath(b *Backend, servers bool) error {
+	if normProto(b.Proto) == "udp" {
+		return nil
+	}
+	if f.lb.set && strings.ToLower(strings.TrimSpace(f.lb.v)) != "path" {
+		return fmt.Errorf("backend %q: -lb %s applies only to udp backends; a path connects to its one server", b.Name, f.lb.v)
+	}
+	if servers {
+		if err := checkOneServer(b); err != nil {
+			return err
+		}
+	}
+	if len(mergeUpstreams(b.Upstream, b.Upstreams)) <= 1 {
+		switch b.LB {
+		case "path", "least_conn", "round_robin", "first":
+			b.LB = ""
+		}
+	}
+	return nil
+}
+
 func findBackend(c *Config, name string) *Backend {
 	for i := range c.Backends {
 		if c.Backends[i].Name == name {
@@ -321,7 +353,7 @@ func backendAdd(args []string) error {
 		return err
 	}
 	if len(pos) != 2 {
-		return errors.New("usage: ayana-cdn backend add <name> <host:port>[,<host:port>...] [flags]")
+		return errors.New("usage: ayana-cdn backend add <name> <host:port> [flags]  (udp: <host:port>[,...] -proto udp -listen :PORT)")
 	}
 	name, ups := pos[0], splitList(pos[1])
 	return editConfig(*cfgPath, f.noReload, func(c *Config) (string, error) {
@@ -335,6 +367,9 @@ func backendAdd(args []string) error {
 			b.Upstreams = ups
 		}
 		f.apply(&b)
+		if err := f.enforcePath(&b, true); err != nil {
+			return "", err
+		}
 		c.Backends = append(c.Backends, b)
 		if strings.EqualFold(b.Proto, "udp") {
 			return fmt.Sprintf("added udp backend %q -> %s (listening on %s; needs `ayana-cdn restart` to bind the socket)",
@@ -370,7 +405,11 @@ func backendSet(args []string) error {
 		if b == nil {
 			return "", fmt.Errorf("no backend named %q", pos[0])
 		}
+		wasUDP := normProto(b.Proto) == "udp"
 		f.apply(b)
+		if err := f.enforcePath(b, f.upstreams.set || (f.proto.set && wasUDP)); err != nil {
+			return "", err
+		}
 		return fmt.Sprintf("updated backend %q", pos[0]), nil
 	})
 }
@@ -450,8 +489,11 @@ func backendList(args []string) error {
 		if !b.strip() {
 			notes = append(notes, "strip=false")
 		}
-		if len(b.Upstreams) > 1 {
+		if b.isUDP() && len(b.Upstreams) > 1 {
 			notes = append(notes, "lb="+b.LB)
+		}
+		if len(b.ignoredUpstreams) > 0 {
+			notes = append(notes, "IGNORED="+strings.Join(b.ignoredUpstreams, ",")+"(one-server-per-path)")
 		}
 		if b.MaxConns > 0 {
 			notes = append(notes, fmt.Sprintf("max_conns=%d", b.MaxConns))
@@ -857,6 +899,9 @@ func cmdCheck(args []string) error {
 				continue
 			}
 			fmt.Printf("  ok   %-14s %-34s %s check %s\n", b.Name, u.addr, hc.Type, fmtDur(time.Since(t0)))
+		}
+		for _, a := range b.ignoredUpstreams {
+			fmt.Printf("  skip %-14s %-34s not used: a path connects to its first server only\n", b.Name, a)
 		}
 	}
 	if failures > 0 {

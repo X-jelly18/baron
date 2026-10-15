@@ -18,7 +18,7 @@ const usageText = `ayana-cdn %s - TLS edge for WebSocket tunnels and HTTP backen
 usage:
   ayana-cdn serve    [-config FILE]            run the edge (systemd runs this)
   ayana-cdn status   [-json]                   live connections, tunnels, upstream health, certificates
-  ayana-cdn check    [-no-dial]                validate the config and probe every upstream
+  ayana-cdn check    [-no-dial]                validate the config and probe the server of every path
   ayana-cdn reload                             apply config changes without dropping anything
   ayana-cdn restart                            zero-downtime restart (also picks up a new binary)
   ayana-cdn config show [-raw]                 print the config with all defaults filled in

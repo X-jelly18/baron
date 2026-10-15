@@ -23,8 +23,9 @@ const routesUsage = `usage: ayana-cdn routes import FILE [-replace] [-no-reload]
 FILE is a routes.json: a JSON object mapping a path prefix to where it goes.
   "/s1": "http://host"                                plain WebSocket backend (port 80)
   "/s2": "https://host:8443"                          TLS backend
-  "/s3": ["http://10.0.0.5", "http://host"]           several upstreams: first wins, the rest are failover
-  "/s4": {"targets": ["http://1.2.3.4"], "host": "name.example", "insecure": true}
+  "/s3": {"target": "http://1.2.3.4", "host": "name.example", "insecure": true}
+A path connects to exactly one target: no load balancing, no failover. To use
+several servers, give each its own path ("/s3": "http://a", "/s4": "http://b").
 The path is forwarded unchanged and the Host header is the target's hostname
 unless "host" is given. Without -replace, backends that are not in FILE are kept.`
 
@@ -126,27 +127,33 @@ func parseRoute(path string, val json.RawMessage) (Backend, error) {
 	if len(targets) == 0 {
 		return Backend{}, errors.New("no target URL")
 	}
-	b := Backend{Name: name, Host: spec.Host, Strip: ptr(false), Insecure: spec.Insecure}
-	for i, t := range targets {
-		addr, useTLS, err := parseTarget(t)
+	// A list (or "targets") with one URL is still accepted: older setup.sh
+	// runs wrote routes that way. Two URLs for the same server count once.
+	var first string
+	var useTLS bool
+	seen := map[string]bool{}
+	var distinct []string
+	for _, t := range targets {
+		addr, tls, err := parseTarget(t)
 		if err != nil {
 			return Backend{}, err
 		}
-		proto := "ws"
-		if useTLS {
-			proto = "wss"
+		if !seen[addr+fmt.Sprint(tls)] {
+			seen[addr+fmt.Sprint(tls)] = true
+			distinct = append(distinct, t)
+			if len(distinct) == 1 {
+				first, useTLS = addr, tls
+			}
 		}
-		if i == 0 {
-			b.Proto = proto
-		} else if proto != b.Proto {
-			return Backend{}, errors.New("all targets of one route must be plain or all TLS")
-		}
-		b.Upstreams = append(b.Upstreams, addr)
 	}
-	if len(b.Upstreams) == 1 {
-		b.Upstream, b.Upstreams = b.Upstreams[0], nil
-	} else {
-		b.LB = "first"
+	if len(distinct) > 1 {
+		return Backend{}, fmt.Errorf("lists %d targets (%s), but a path connects to exactly one server: "+
+			"give each server its own path, e.g. %q: %q, %q: %q",
+			len(distinct), strings.Join(distinct, ", "), "/"+name, distinct[0], "/"+name+"-2", distinct[1])
+	}
+	b := Backend{Name: name, Upstream: first, Proto: "ws", Host: spec.Host, Strip: ptr(false), Insecure: spec.Insecure}
+	if useTLS {
+		b.Proto = "wss"
 	}
 	return b, nil
 }
@@ -246,11 +253,7 @@ func cmdRoutes(args []string) error {
 		var msg strings.Builder
 		fmt.Fprintf(&msg, "imported %d route(s) from %s:\n", len(backends), pos[0])
 		for _, b := range backends {
-			ups := b.Upstreams
-			if b.Upstream != "" {
-				ups = []string{b.Upstream}
-			}
-			fmt.Fprintf(&msg, "  /%-12s -> %s (%s)\n", b.Name, strings.Join(ups, ", "), b.Proto)
+			fmt.Fprintf(&msg, "  /%-12s -> %s (%s)\n", b.Name, b.Upstream, b.Proto)
 		}
 		if *replace {
 			// A routes.json can only describe ws/wss backends. UDP backends

@@ -391,7 +391,7 @@ type backendStatus struct {
 	Host          string             `json:"host,omitempty"` // Host header / SNI sent to the backend
 	Strip         bool               `json:"strip"`          // strip /<name> from the path
 	Insecure      bool               `json:"insecure"`       // backend cert not verified
-	LB            string             `json:"lb"`             // load-balancing policy
+	LB            string             `json:"lb"`             // "path" (one server per path), or the udp policy
 	Disabled      bool               `json:"disabled"`
 	TunnelsActive int64              `json:"tunnels_active"`
 	TunnelsTotal  uint64             `json:"tunnels_total"`
@@ -403,6 +403,8 @@ type backendStatus struct {
 	PacketsDown   uint64             `json:"packets_down,omitempty"`
 	Responses     map[string]uint64  `json:"responses"`
 	Upstreams     []upstreamSnapshot `json:"upstreams"`
+	// Servers after the first that an older config lists on a path; never dialed.
+	IgnoredUpstreams []string `json:"ignored_upstreams,omitempty"`
 }
 
 type runtimeStatus struct {
@@ -473,7 +475,8 @@ func (s *Server) buildStatus() statusDoc {
 			TunnelsActive: b.stats.tunnelsActive.Load(), TunnelsTotal: b.stats.tunnelsTotal.Load(),
 			Failures: b.stats.tunnelsFailed.Load(), CapRejections: b.stats.rejectedCap.Load(),
 			BytesUp: b.stats.bytesUp.Load(), BytesDown: b.stats.bytesDown.Load(),
-			Responses: map[string]uint64{},
+			Responses:        map[string]uint64{},
+			IgnoredUpstreams: b.cfg.ignoredUpstreams,
 		}
 		if b.udp {
 			bs.Path, bs.Listen = "", b.cfg.Listen

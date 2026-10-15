@@ -1,5 +1,41 @@
 # Changelog
 
+## 2.7.0
+
+### Changed
+
+- **Path-based routing: each path connects only to its own server.** A path
+  (backend) used to balance between the servers it listed (`least_conn` by
+  default) and fail over to the next one when a server did not answer. Now a
+  path connects to exactly one server and to nothing else: no load balancing,
+  no failover. If that server is down, the client gets `502` and retries; it is
+  never sent to another server. Health checks still run and show each server's
+  state in `status`, the panel and the metrics, but never route anywhere. For
+  several servers, give each its own path. UDP backends, which are reached by
+  port rather than by path, keep their upstream lists and `lb` policies.
+- **Upgrading is safe.** A config that lists several servers on one path still
+  loads (an upgrade never stops the edge): the path uses its first server, and
+  a warning names the ignored ones in the log, `ayana-cdn check`, `backend ls`
+  and on the path's card in the panel. The file itself is left as it is.
+  Tunnels opened to another server before the upgrade keep running until they
+  close; Prometheus series for the ignored servers disappear.
+- **New input takes one server per path.** The panel, `ayana-cdn backend
+  add/set` and `ayana-cdn routes import` refuse several servers on one path
+  ("give each server its own path"); the panel's form has a single Server
+  field and shows LB only for udp. `setup.sh` takes one target per path; when
+  it reapplies a saved routes file that still lists several, it keeps the
+  running routes and says so instead of stopping the upgrade.
+- `lb` for a path backend is `path` (the default). The `least_conn`,
+  `round_robin` and `first` of older configs are accepted and mean the same;
+  `ayana-cdn backend set NAME -lb ...` refuses them, and `hash` stays udp-only.
+- `config/examples/failover.json` is now `per-path.json` (one server per path).
+
+### Fixed
+
+- `TestUDPSilentUpstreamClosed` could pass its wait before the session existed
+  and then miss the log line under a loaded test run; it now waits for the
+  close itself.
+
 ## 2.6.3
 
 ### Fixed

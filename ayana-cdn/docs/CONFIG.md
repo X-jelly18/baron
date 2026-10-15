@@ -74,7 +74,7 @@ are counted in `ayana_cdn_udp_dropped_total{backend,reason}`, not in
 |---|---|---|
 | `read_header` | `"10s"` | Time a client has to complete the TLS handshake and send its request headers. **restart** |
 | `http_idle` | `"75s"` | Idle keep-alive time between requests on a plain HTTP connection (tunnels are not affected). **restart** |
-| `upstream_connect` | `"5s"` | Per-upstream connect budget (TCP + TLS). With several upstreams, the next one is tried after this. |
+| `upstream_connect` | `"5s"` | Connect budget (TCP + TLS) to a path's server; past it the client gets `502` (no other server is tried). |
 | `upstream_header` | `"15s"` | The backend must answer the request head within this, else the client gets `504`. |
 | `request_body` | `"60s"` | Bound on reading a client request *body* (a slow-body / R-U-Dead-Yet hold of a goroutine and an upstream connection). Applies only to requests that carry a body, so GET and SSE subscribers are unaffected, and it never touches a streaming *response*. `-1` turns it off for legitimately slow large uploads. |
 | `tunnel_idle` | `0` = never | Close a tunnel that has carried no bytes in either direction for this long. Most SSH clients keep tunnels alive themselves; set this only if you see leaks. |
@@ -164,7 +164,7 @@ times, and — when geolocation is on — where from.
 | Key | Default | Meaning |
 |---|---|---|
 | `name` | required | Path prefix: clients use `/<name>/…`. Letters, digits, `_`, `-`; `healthz` is reserved. Matching is exact on path segments: `/native1` never matches `/native10`. |
-| `upstreams` | required | `["host:port", …]`. v1's single `upstream` string is still accepted. |
+| `upstreams` | required | The server: `"upstream": "host:port"` (or a one-entry `upstreams` list). **A path connects to exactly one server**: no load balancing, no failover; if it is down the client gets `502` and retries. For several servers, give each its own path. Only `udp` backends may list several (`["host:port", …]`). A config from an older version with several servers on one path still loads, but only the first is used and a warning names the others (log, `ayana-cdn check`, panel); the panel, `backend add/set` and `routes import` refuse several. |
 | `host` | first upstream's hostname | `Host:` header and TLS SNI sent to the backend. |
 | `proto` | `"wss"` | What the backend speaks. `wss`/`ws`: tunnel backend (every request is relayed after the upgrade), over TLS or plain. `https`/`http`: HTTP backend, proxied; upgrade requests are still tunnelled. `sse` is `https` with a name that says what it is for (all proxied responses stream). `udp`: a datagram relay on its own port (see `listen`). |
 | `listen` | (udp only) | For `proto: "udp"`, the `host:port` this backend receives datagrams on, e.g. `":51820"`. UDP carries no path, so a udp backend owns a port instead of a `/name/` prefix. Required for udp, rejected otherwise. **restart** (bound when the process starts; `ayana-cdn restart` picks up a new one). Use `[::]:port` for a dual-stack socket. |
@@ -172,12 +172,11 @@ times, and — when geolocation is on — where from.
 | `strip` | `true` | Remove `/<name>` before forwarding. `false` sends the full path. Encoded characters are preserved either way. |
 | `insecure` | `false` | Skip verification of the backend's certificate (self-signed backends). Logged as a warning. |
 | `disabled` | `false` | Answer `503` instead of proxying; open tunnels are unaffected. `ayana-cdn backend disable NAME`. |
-| `lb` | `least_conn` (tcp), `hash` (udp) | With several upstreams: `least_conn`, `round_robin`, `first` (failover order), or `hash` (udp only: a client's address always picks the same upstream, so a re-created session or a client's QUIC migration keeps talking to the same stateful server). Unhealthy upstreams go last and are still tried if all others fail. |
+| `lb` | `path` (path backends), `hash` (udp) | `path`: the path's one server, nothing else. The `least_conn`, `round_robin` and `first` of older versions are still accepted in a path backend's config and mean `path`. udp backends choose between their upstreams: `hash` (a client's address always picks the same upstream, so a re-created session or a client's QUIC migration keeps talking to the same stateful server), `least_conn`, `round_robin` or `first`; unhealthy upstreams go last and are still tried if all others fail. |
 | `relay` | `"upgrade"` | `upgrade`: relay after any `101`; other responses are forwarded as HTTP and the client connection stays usable. `always`: relay from the first byte, for backends that answer `200` then go raw, or that do not speak HTTP at all. `ws`/`wss` only. |
 | `max_conns` | `0` = no cap | Concurrent tunnels for this backend; over it, clients get `503`. |
 | `idle_timeout` | global `tunnel_idle` (udp: `udp_idle`) | Per-backend idle timeout for tunnels or UDP sessions. |
-| `health_check` | see below | For udp backends this must be `off`: datagrams cannot be probed. A udp upstream is marked down by a hard ICMP error or by `udp_reply` elapsing with no answer, and back up by its first reply. |
-| `health_check` | see below | Active check that feeds upstream ordering and the `upstream_up` metric. |
+| `health_check` | see below | Active check of the path's server: it feeds the up/down state in `status` and the panel and the `upstream_up` metric, and never sends a client anywhere else. For udp backends this must be `off`: datagrams cannot be probed. A udp upstream is marked down by a hard ICMP error or by `udp_reply` elapsing with no answer, and back up by its first reply. |
 
 ### `backends[].health_check`
 
@@ -191,8 +190,10 @@ times, and — when geolocation is on — where from.
 | `rise` | `2` | Consecutive successes before it is marked up again. |
 | `expect` | | Exact status to require for `http`/`ws` instead of the defaults above. |
 
-A backend with all upstreams down is still tried on each request (fail-open),
-so a health checker that is wrong cannot take a working backend offline.
+A path's server is tried on each request even while it is marked down
+(fail-open), so a health checker that is wrong cannot take a working backend
+offline; if the server really is down, the client gets `502` and retries. No
+other server is ever tried.
 
 ## routes.json
 
@@ -206,8 +207,12 @@ each value is one of:
 |---|---|
 | `"http://host[:port]"` | plain `ws` backend, port 80 unless given |
 | `"https://host[:port]"` | `wss` backend, port 443 unless given |
-| `["http://a", "http://b"]` | several upstreams, `lb: first`: `a` is tried first, `b` is failover |
-| `{"targets": [...], "host": "name", "insecure": true}` | the same, plus an explicit Host header and no certificate check |
+| `{"target": "http://a", "host": "name", "insecure": true}` | the same, plus an explicit Host header and no certificate check |
+
+A path has exactly one target. A one-entry list (`["http://a"]`, or
+`"targets": [...]` as older `setup.sh` runs wrote it) is still accepted; two
+or more different targets on one path are refused: give each server its own
+path (`"/s1": "http://a", "/s1-2": "http://b"`).
 
 Without `-replace`, backends whose names are not in the file are kept. The
 import is validated before it is saved, and the running edge is reloaded.
@@ -258,10 +263,10 @@ tunnel side by side).
 
 ## Examples
 
-`config/examples/` has complete files for: failover pools (`failover.json`),
-raw SSH/stunnel backends (`raw-tunnels.json`), plain HTTP apps next to the
-tunnels (`http-backends.json`), certificate files instead of ACME
-(`files-tls.json`), and running behind the nginx front door
+`config/examples/` has complete files for: one server per path
+(`per-path.json`), raw SSH/stunnel backends (`raw-tunnels.json`), plain HTTP
+apps next to the tunnels (`http-backends.json`), certificate files instead of
+ACME (`files-tls.json`), and running behind the nginx front door
 (`frontdoor.json`).
 
 Minimal v2 file:

@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -81,10 +80,12 @@ func (u *upstream) snapshot(now time.Time) upstreamSnapshot {
 	}
 }
 
-// pool holds the upstreams of one backend.
+// pool holds the upstreams of one backend. A path backend's pool holds its
+// one server (pinned); only a udp pool holds several and chooses between them.
 type pool struct {
 	backend  string
 	ups      []*upstream
+	pinned   bool
 	lb       string
 	rr       atomic.Uint64
 	connect  time.Duration
@@ -111,6 +112,7 @@ func upstreamKey(b Backend, addr string) string {
 func newPool(b Backend, to *Timeouts, prev *pool, log *slog.Logger) *pool {
 	p := &pool{
 		backend:  b.Name,
+		pinned:   b.isPathRouted(),
 		lb:       b.LB,
 		connect:  to.UpstreamConnect.D(),
 		ka:       newKeepAlive(to),
@@ -118,7 +120,11 @@ func newPool(b Backend, to *Timeouts, prev *pool, log *slog.Logger) *pool {
 		cooldown: max(b.HealthCheck.Interval.D(), 5*time.Second),
 		log:      log,
 	}
-	for _, addr := range b.Upstreams {
+	addrs := b.Upstreams
+	if p.pinned && len(addrs) > 1 {
+		addrs = addrs[:1] // config validation already keeps one; never dial another server
+	}
+	for _, addr := range addrs {
 		key := upstreamKey(b, addr)
 		var u *upstream
 		if prev != nil {
@@ -156,9 +162,10 @@ func newPool(b Backend, to *Timeouts, prev *pool, log *slog.Logger) *pool {
 	return p
 }
 
-// order returns the upstreams to try: by policy, healthy ones first, the rest
-// after them. Unhealthy upstreams stay in the list (fail-open): trying a
-// possibly-down upstream beats refusing the client outright.
+// order returns the upstreams of a udp pool to try for a new session: by
+// policy, healthy ones first, the rest after them. Unhealthy upstreams stay in
+// the list (fail-open): trying a possibly-down upstream beats refusing the
+// client outright. Path backends never choose: see dial.
 func (p *pool) order(now time.Time) []*upstream {
 	n := len(p.ups)
 	cands := make([]*upstream, 0, n)
@@ -189,29 +196,32 @@ func (p *pool) order(now time.Time) []*upstream {
 	return append(out, down...)
 }
 
-// dial connects to the first upstream that answers. Failover happens at the
-// dial, before any request bytes are sent, so it is safe for every request.
+// dial connects a client of a path backend (tunnels and HTTP requests) to its
+// one server, and to nothing else: if the server does not answer, the client
+// gets the error (a 502) and retries; there is no failover to another server.
+// The server is dialed even while it is marked down, so service resumes the
+// moment it is back. (udp sessions dial through dialUDP.)
 func (p *pool) dial(ctx context.Context) (net.Conn, *upstream, error) {
 	if len(p.ups) == 0 {
 		return nil, nil, errors.New("backend has no upstreams")
 	}
-	var errs []string
-	for _, u := range p.order(time.Now()) {
-		c, err := p.dialOne(ctx, u)
-		if err == nil {
-			u.dialOK.Add(1)
-			p.onSuccess(u)
-			u.active.Add(1)
-			return &upstreamConn{Conn: c, u: u}, u, nil
-		}
-		if ctx.Err() != nil { // the client went away; not the upstream's fault
+	if !p.pinned {
+		return nil, nil, errors.New("not a path backend") // unreachable: udp never dials here
+	}
+	u := p.ups[0]
+	c, err := p.dialOne(ctx, u)
+	if err != nil {
+		if ctx.Err() != nil { // the client went away; not the server's fault
 			return nil, nil, ctx.Err()
 		}
 		u.dialErr.Add(1)
 		p.onFailure(u, err)
-		errs = append(errs, u.addr+": "+errString(err))
+		return nil, nil, fmt.Errorf("server %s: %s", u.addr, errString(err))
 	}
-	return nil, nil, fmt.Errorf("all upstreams failed: %s", strings.Join(errs, "; "))
+	u.dialOK.Add(1)
+	p.onSuccess(u)
+	u.active.Add(1)
+	return &upstreamConn{Conn: c, u: u}, u, nil
 }
 
 func (p *pool) dialOne(ctx context.Context, u *upstream) (net.Conn, error) {

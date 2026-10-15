@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 func TestV1ConfigLoadsUnchanged(t *testing.T) {
@@ -24,7 +26,7 @@ func TestV1ConfigLoadsUnchanged(t *testing.T) {
 	if b.Name != "native10" || len(b.Upstreams) != 1 || b.Upstreams[0] != "native10.example.com:443" || b.Upstream != "" {
 		t.Fatalf("upstream not merged: %+v", b)
 	}
-	if !b.useTLS() || !b.strip() || b.Proto != "wss" || b.Relay != "upgrade" || b.LB != "least_conn" {
+	if !b.useTLS() || !b.strip() || b.Proto != "wss" || b.Relay != "upgrade" || b.LB != "path" {
 		t.Fatalf("unexpected backend defaults: %+v", b)
 	}
 	if b.HealthCheck.Type != "tls" || b.HealthCheck.Interval.D() != 10*time.Second {
@@ -99,6 +101,25 @@ func TestValidation(t *testing.T) {
 		{"ws with tls true", func(c *Config) { c.Backends[0].Proto = "ws"; c.Backends[0].TLS = ptr(true) }, `use "wss"`},
 		{"bad proto", func(c *Config) { c.Backends[0].Proto = "quic" }, "proto must be"},
 		{"bad lb", func(c *Config) { c.Backends[0].LB = "random" }, "lb must be"},
+		{"lb path", func(c *Config) { c.Backends[0].LB = "path" }, ""},
+		{"older lb least_conn still loads", func(c *Config) { c.Backends[0].LB = "least_conn" }, ""},
+		{"older lb round_robin still loads", func(c *Config) { c.Backends[0].LB = "round_robin" }, ""},
+		{"older lb first still loads", func(c *Config) { c.Backends[0].LB = "first" }, ""},
+		{"several servers on a path still load", func(c *Config) { c.Backends[0].Upstreams = []string{"n1b.example.com:443"} }, ""},
+		{"hash on a path", func(c *Config) { c.Backends[0].LB = "hash" }, "applies only to udp"},
+		{"path on udp", func(c *Config) {
+			c.Backends[0].Proto = "udp"
+			c.Backends[0].TLS = ptr(false)
+			c.Backends[0].Listen = ":36712"
+			c.Backends[0].LB = "path"
+		}, "applies to path backends"},
+		{"udp with several upstreams", func(c *Config) {
+			c.Backends[0].Proto = "udp"
+			c.Backends[0].TLS = ptr(false)
+			c.Backends[0].Listen = ":36712"
+			c.Backends[0].Upstreams = []string{"n1b.example.com:443"}
+			c.Backends[0].LB = "round_robin"
+		}, ""},
 		{"relay always on http", func(c *Config) { c.Backends[0].Proto = "https"; c.Backends[0].Relay = "always" }, "only applies to ws/wss"},
 		{"tls check on plaintext", func(c *Config) {
 			c.Backends[0].Proto = "ws"
@@ -185,6 +206,87 @@ func TestWarnings(t *testing.T) {
 	}
 }
 
+// A path connects to one server. An older config that lists several on one
+// path still loads (upgrade safety), with only the first server in the
+// effective config, a warning, and the file itself left as it was.
+func TestPathBackendKeepsOneServer(t *testing.T) {
+	c := baseRaw()
+	c.Backends[0].Upstream = ""
+	c.Backends[0].Upstreams = []string{"a.example.com:443", " b.example.com:443", "a.example.com:443", "c.example.com:443"}
+	c.Backends[0].LB = "first"
+	c.Backends = append(c.Backends, Backend{Name: "dns", Proto: "udp", Listen: ":5353",
+		Upstreams: []string{"10.0.0.1:53", "10.0.0.2:53"}, LB: "round_robin"})
+	e, err := c.Effective()
+	if err != nil {
+		t.Fatalf("an older config with several servers on a path must still load: %v", err)
+	}
+	b := e.Backends[0]
+	if len(b.Upstreams) != 1 || b.Upstreams[0] != "a.example.com:443" || b.LB != "path" {
+		t.Fatalf("effective path backend: upstreams %v, lb %q", b.Upstreams, b.LB)
+	}
+	if strings.Join(b.ignoredUpstreams, ",") != "b.example.com:443,c.example.com:443" {
+		t.Fatalf("ignored servers: %v", b.ignoredUpstreams)
+	}
+	all := strings.Join(e.warnings, "\n")
+	if !strings.Contains(all, `backend "n1": path /n1/ connects to one server only: using a.example.com:443, ignoring b.example.com:443, c.example.com:443`) {
+		t.Fatalf("missing warning:\n%s", all)
+	}
+	if u := e.Backends[1]; len(u.Upstreams) != 2 || u.LB != "round_robin" || len(u.ignoredUpstreams) != 0 || strings.Contains(all, `"dns"`) {
+		t.Fatalf("a udp backend keeps every upstream and its policy: %+v\n%s", u, all)
+	}
+	if len(c.Backends[0].Upstreams) != 4 || c.Backends[0].LB != "first" {
+		t.Fatal("Effective must not change the raw config (the file keeps what it lists)")
+	}
+}
+
+func TestCheckOneServer(t *testing.T) {
+	for _, tc := range []struct {
+		b    Backend
+		want string
+	}{
+		{Backend{Name: "a", Upstream: "x:1"}, ""},
+		{Backend{Name: "a", Upstreams: []string{"x:1", " x:1 "}}, ""}, // the same server twice counts once
+		{Backend{Name: "a", Upstreams: []string{"x:1", "y:1"}}, "give each server its own path"},
+		{Backend{Name: "a", Upstream: "x:1", Upstreams: []string{"y:1"}, Proto: "HTTP"}, "connects to exactly one server, but 2"},
+		{Backend{Name: "a", Upstreams: []string{"x:1", "y:1"}, Proto: " udp "}, ""},
+	} {
+		err := checkOneServer(&tc.b)
+		if (tc.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.want)) {
+			t.Errorf("%+v: got %v, want %q", tc.b, err, tc.want)
+		}
+	}
+}
+
+// Every shipped example and the default config load, and none of them puts
+// several servers on one path.
+func TestShippedExamplesLoad(t *testing.T) {
+	files, _ := filepath.Glob("../../config/examples/*.json")
+	files = append(files, "../../config/config.json")
+	if len(files) < 2 {
+		t.Skip("config files not found")
+	}
+	for _, f := range files {
+		raw, err := loadRaw(f)
+		if err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		if raw.Panel != nil && strings.Contains(raw.Panel.PasswordHash, "REPLACE") {
+			h, _ := bcrypt.GenerateFromPassword([]byte("x"), bcrypt.MinCost)
+			raw.Panel.PasswordHash = string(h) // the example's placeholders until `panel passwd`
+			raw.Panel.SessionKey = ""
+		}
+		e, err := raw.Effective()
+		if err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
+		for _, b := range e.Backends {
+			if len(b.ignoredUpstreams) > 0 {
+				t.Errorf("%s: backend %q lists several servers on one path", f, b.Name)
+			}
+		}
+	}
+}
+
 func TestDurationJSON(t *testing.T) {
 	var v struct{ D Duration }
 	for in, want := range map[string]time.Duration{`"1m30s"`: 90 * time.Second, `45`: 45 * time.Second, `"0s"`: 0, `1.5`: 1500 * time.Millisecond} {
@@ -236,7 +338,7 @@ func TestSaveRawKeepsFileMinimal(t *testing.T) {
 		t.Fatal(err)
 	}
 	out, _ := os.ReadFile(path)
-	for _, unwanted := range []string{"timeouts", "health_check", "least_conn", "limits", "admin_listen"} {
+	for _, unwanted := range []string{"timeouts", "health_check", `"lb"`, "limits", "admin_listen"} {
 		if strings.Contains(string(out), unwanted) {
 			t.Errorf("saved file contains injected default %q", unwanted)
 		}

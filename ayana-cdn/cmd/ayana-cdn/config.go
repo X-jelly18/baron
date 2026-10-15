@@ -171,20 +171,24 @@ type PanelConfig struct {
 // Backend is one origin. Clients reach it at https://<cdn host>/<name>/...
 type Backend struct {
 	Name        string       `json:"name"`
-	Upstream    string       `json:"upstream,omitempty"` // v1 form; merged into upstreams
-	Upstreams   []string     `json:"upstreams,omitempty"`
-	Listen      string       `json:"listen,omitempty"` // udp: the address this backend receives datagrams on
+	Upstream    string       `json:"upstream,omitempty"`  // v1 form; merged into upstreams
+	Upstreams   []string     `json:"upstreams,omitempty"` // path backends use exactly one server; udp may list several
+	Listen      string       `json:"listen,omitempty"`    // udp: the address this backend receives datagrams on
 	Host        string       `json:"host,omitempty"`
 	Proto       string       `json:"proto,omitempty"`
 	TLS         *bool        `json:"tls,omitempty"`
 	Strip       *bool        `json:"strip,omitempty"`
 	Insecure    bool         `json:"insecure,omitempty"`
 	Disabled    bool         `json:"disabled,omitempty"`
-	LB          string       `json:"lb,omitempty"`
+	LB          string       `json:"lb,omitempty"` // "path" (path backends: their one server); udp: hash | least_conn | round_robin | first
 	Relay       string       `json:"relay,omitempty"`
 	MaxConns    int          `json:"max_conns,omitempty"`
 	IdleTimeout Duration     `json:"idle_timeout,omitempty"`
 	HealthCheck *HealthCheck `json:"health_check,omitempty"`
+
+	// ignoredUpstreams holds the servers after the first of a path backend in
+	// an older config. Only the effective copy sets it; it is never saved.
+	ignoredUpstreams []string
 }
 
 // HealthCheck configures active probing of every upstream of a backend.
@@ -202,6 +206,57 @@ func (b *Backend) useTLS() bool   { return b.TLS != nil && *b.TLS }
 func (b *Backend) strip() bool    { return b.Strip == nil || *b.Strip }
 func (b *Backend) isTunnel() bool { return b.Proto == "ws" || b.Proto == "wss" }
 func (b *Backend) isUDP() bool    { return b.Proto == "udp" }
+
+// isPathRouted reports a backend reached by its path (every proto but udp).
+// Such a backend connects to exactly one server: no balancing, no failover.
+func (b *Backend) isPathRouted() bool { return !b.isUDP() }
+
+// normProto is the proto as applyDefaults stores it.
+func normProto(p string) string {
+	p = strings.ToLower(strings.TrimSpace(p))
+	if p == "" {
+		return "wss"
+	}
+	return p
+}
+
+// mergeUpstreams joins the v1 "upstream" and the "upstreams" list, trimmed
+// and without duplicates, in order: the first entry is the server a path uses.
+func mergeUpstreams(single string, list []string) []string {
+	var ups []string
+	seen := map[string]bool{}
+	for _, u := range append([]string{single}, list...) {
+		u = strings.TrimSpace(u)
+		if u != "" && !seen[u] {
+			seen[u] = true
+			ups = append(ups, u)
+		}
+	}
+	return ups
+}
+
+// errSeveralServers is how new input (the panel, `backend add/set`, `routes
+// import`) is told that a path takes one server. A config that already lists
+// several still loads (only the first is used, with a warning), so an upgrade
+// never stops a running edge.
+func errSeveralServers(name string, ups []string) error {
+	alt := name + "-2"
+	return fmt.Errorf("path /%s/ connects to exactly one server, but %d were given (%s): "+
+		"give each server its own path (for example keep %s on /%s/ and add %s as /%s/)",
+		name, len(ups), strings.Join(ups, ", "), ups[0], name, ups[1], alt)
+}
+
+// checkOneServer refuses new input that puts several servers on a path
+// backend. It reads a raw backend and does not modify it.
+func checkOneServer(b *Backend) error {
+	if normProto(b.Proto) == "udp" {
+		return nil
+	}
+	if ups := mergeUpstreams(b.Upstream, b.Upstreams); len(ups) > 1 {
+		return errSeveralServers(strings.TrimSpace(b.Name), ups)
+	}
+	return nil
+}
 
 // ---- loading -----------------------------------------------------------------
 
@@ -431,20 +486,9 @@ func (p *PanelConfig) applyDefaults() {
 
 func (b *Backend) applyDefaults() {
 	b.Name = strings.TrimSpace(b.Name)
-	var ups []string
-	seen := map[string]bool{}
-	for _, u := range append([]string{b.Upstream}, b.Upstreams...) {
-		u = strings.TrimSpace(u)
-		if u != "" && !seen[u] {
-			seen[u] = true
-			ups = append(ups, u)
-		}
-	}
+	ups := mergeUpstreams(b.Upstream, b.Upstreams)
 	b.Upstream, b.Upstreams = "", ups
-	b.Proto = strings.ToLower(strings.TrimSpace(b.Proto))
-	if b.Proto == "" {
-		b.Proto = "wss"
-	}
+	b.Proto = normProto(b.Proto)
 	b.Listen = strings.TrimSpace(b.Listen)
 	if b.TLS == nil {
 		b.TLS = ptr(b.Proto == "wss" || b.Proto == "https" || b.Proto == "sse")
@@ -452,11 +496,17 @@ func (b *Backend) applyDefaults() {
 	if b.Strip == nil {
 		b.Strip = ptr(true)
 	}
-	if b.LB == "" {
-		if b.isUDP() {
+	if b.isUDP() {
+		if b.LB == "" {
 			b.LB = "hash" // keep every flow of one client on the same upstream (stateful UDP)
-		} else {
-			b.LB = "least_conn"
+		}
+	} else {
+		switch b.LB {
+		case "", "least_conn", "round_robin", "first":
+			// A path connects to its one server. The balancing policies of
+			// older versions are still accepted in a config file and mean the
+			// same thing now.
+			b.LB = "path"
 		}
 	}
 	if b.Relay == "" {
@@ -661,6 +711,16 @@ func (c *Config) validate() error {
 			}
 			udpListen[b.Listen] = b.Name
 		}
+		if b.isPathRouted() && len(b.Upstreams) > 1 {
+			// An older config may list several servers on one path. It still
+			// loads, so an upgrade never takes the edge down, but only the
+			// first server is used: a path never reaches another server.
+			b.ignoredUpstreams = append([]string(nil), b.Upstreams[1:]...)
+			b.Upstreams = b.Upstreams[:1]
+			warn = append(warn, fmt.Sprintf("%s: path /%s/ connects to one server only: using %s, ignoring %s. "+
+				"Give each server its own path (edit this one to keep a single server, then add the others as new paths)",
+				label, b.Name, b.Upstreams[0], strings.Join(b.ignoredUpstreams, ", ")))
+		}
 		if b.Insecure {
 			warn = append(warn, fmt.Sprintf("%s: insecure=true, the backend certificate is not verified", label))
 		}
@@ -729,17 +789,20 @@ func (b *Backend) validate() error {
 	if strings.ContainsAny(b.Host, " /\t\r\n") {
 		return fmt.Errorf("host %q is not a valid hostname", b.Host)
 	}
-	switch b.LB {
-	case "least_conn", "round_robin", "first":
-	case "hash":
-		if !b.isUDP() {
-			return errors.New(`lb "hash" applies only to udp backends`)
-		}
-	default:
-		if b.isUDP() {
+	switch {
+	case b.isUDP():
+		switch b.LB {
+		case "hash", "least_conn", "round_robin", "first":
+		case "path":
+			return errors.New(`lb "path" applies to path backends; a udp backend uses hash, least_conn, round_robin or first`)
+		default:
 			return fmt.Errorf("lb must be hash, least_conn, round_robin or first, not %q", b.LB)
 		}
-		return fmt.Errorf("lb must be least_conn, round_robin or first, not %q", b.LB)
+	case b.LB == "path":
+	case b.LB == "hash":
+		return errors.New(`lb "hash" applies only to udp backends; a path connects to its one server (lb "path")`)
+	default:
+		return fmt.Errorf(`lb must be "path" (a path connects to its one server), not %q`, b.LB)
 	}
 	switch b.Relay {
 	case "upgrade":

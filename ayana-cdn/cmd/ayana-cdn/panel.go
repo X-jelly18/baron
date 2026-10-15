@@ -422,7 +422,10 @@ func (s *Server) applyBackendEdit(action, name string, r *http.Request) (string,
 			if findBackend(c, name) != nil {
 				return errPanel("backend " + strconv.Quote(name) + " already exists")
 			}
-			nb := backendFromForm(name, r)
+			nb, err := backendFromForm(name, r)
+			if err != nil {
+				return err
+			}
 			c.Backends = append(c.Backends, nb)
 			msg = "added backend " + name
 		case "update":
@@ -430,7 +433,10 @@ func (s *Server) applyBackendEdit(action, name string, r *http.Request) (string,
 			if b == nil {
 				return errPanel("no backend named " + strconv.Quote(name))
 			}
-			nb := backendFromForm(name, r)
+			nb, err := backendFromForm(name, r)
+			if err != nil {
+				return err
+			}
 			nb.Disabled = b.Disabled // preserve the enabled/disabled state across an edit
 			*b = nb
 			msg = "updated backend " + name
@@ -442,10 +448,12 @@ func (s *Server) applyBackendEdit(action, name string, r *http.Request) (string,
 	return msg, err
 }
 
-// backendFromForm builds a backend from the panel's add/update form. The whole
-// config is validated by Effective() in panelEditConfig, so this only has to
-// assemble the fields; invalid combinations are reported from there.
-func backendFromForm(name string, r *http.Request) Backend {
+// backendFromForm builds a backend from the panel's add/update form. It
+// refuses several servers on a path (a path connects to exactly one); every
+// other check is the whole-config validation by Effective() in
+// panelEditConfig. A path backend gets no lb (its one server is the policy),
+// whatever an older panel page still posts.
+func backendFromForm(name string, r *http.Request) (Backend, error) {
 	b := Backend{
 		Name:      name,
 		Upstreams: splitList(r.PostFormValue("upstreams")),
@@ -458,7 +466,13 @@ func backendFromForm(name string, r *http.Request) Backend {
 	}
 	// strip defaults to true unless explicitly "false".
 	b.Strip = ptr(r.PostFormValue("strip") != "false")
-	return b
+	if normProto(b.Proto) != "udp" {
+		b.LB = ""
+		if err := checkOneServer(&b); err != nil {
+			return Backend{}, errPanel(err.Error())
+		}
+	}
+	return b, nil
 }
 
 func (s *Server) panelHost(w http.ResponseWriter, r *http.Request, st *state) {

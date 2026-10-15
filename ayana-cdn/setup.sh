@@ -112,7 +112,8 @@ prompt_routes() {
 		echo "One route at a time; leave the path empty when done."
 		echo "  path:   what clients use, one segment, e.g. /s1"
 		echo "  target: http://IP-or-host[:port] (plain) or https://host[:port] (TLS);"
-		echo "          several separated by commas = failover, the first is tried first"
+		echo "          exactly one per path (a path connects to one server: no load"
+		echo "          balancing, no failover); for another server, add another path"
 		while true; do
 			ask path "Path [$n]: "
 			path=${path// /}
@@ -121,6 +122,10 @@ prompt_routes() {
 			ask target "Target for $path: "
 			target=${target// /}
 			[ -n "$target" ] || { echo "  a target is required" >&2; continue; }
+			case "$target" in *,*)
+				echo "  one target per path: give each server its own path (e.g. $path and $path-2)" >&2
+				continue ;;
+			esac
 			ask host "Host header for $path (Enter = the target's hostname): "
 			printf '%s\t%s\t%s\n' "$path" "$target" "${host// /}" >>"$entries"
 			n=$((n + 1))
@@ -135,13 +140,7 @@ import json, sys
 routes = {}
 for line in open(sys.argv[1]):
     path, target, host = line.rstrip("\n").split("\t")
-    targets = [t for t in target.split(",") if t]
-    if host:
-        routes[path] = {"targets": targets, "host": host}
-    elif len(targets) == 1:
-        routes[path] = targets[0]
-    else:
-        routes[path] = targets
+    routes[path] = {"target": target, "host": host} if host else target
 json.dump(routes, sys.stdout, indent=2)
 print()
 PY
@@ -176,7 +175,13 @@ prompt)
 		prompt_routes
 	elif [ -f "$ROUTES" ]; then
 		echo "==> no terminal: reapplying $ROUTES"
-		apply_routes "$ROUTES"
+		if ! apply_routes "$ROUTES"; then
+			# An older setup.sh could save several targets for one path, which a
+			# path no longer takes. Keep the running routes (each path uses its
+			# first server) instead of stopping the upgrade here.
+			echo "warning: $ROUTES was not applied (see above); keeping the routes in $CONF." >&2
+			echo "         Give each server its own path, then run: sudo ./setup.sh --routes FILE" >&2
+		fi
 	else
 		echo "==> no terminal and no $ROUTES: keeping the routes in $CONF" >&2
 	fi ;;
@@ -185,8 +190,8 @@ esac
 # ---- verify --------------------------------------------------------------------------
 
 echo
-echo "==> probing every upstream"
-ayana-cdn check -config "$CONF" || echo "warning: some upstreams are unreachable from this VPS (see above)" >&2
+echo "==> probing the server of every path"
+ayana-cdn check -config "$CONF" || echo "warning: some servers are unreachable from this VPS (see above)" >&2
 
 echo
 if ayana-cdn status -config "$CONF" 2>/dev/null; then

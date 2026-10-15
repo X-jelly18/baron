@@ -9,9 +9,9 @@ import (
 )
 
 // newHTTPProxy builds the handler for ordinary (non-upgrade) requests to
-// http/https/sse backends. Connections come from the backend's pool, so
-// failover and health checks apply here too; keep-alive connections are
-// reused through the Transport.
+// http/https/sse backends. Every connection is dialed through the backend's
+// pool, so it goes to the path's one server like a tunnel does; keep-alive
+// connections are reused through this backend's own Transport.
 func (s *Server) newHTTPProxy(brt *backendRT, cfg *Config) http.Handler {
 	b := brt.cfg
 	scheme := "http"
@@ -50,7 +50,7 @@ func (s *Server) newHTTPProxy(brt *backendRT, cfg *Config) http.Handler {
 			pr.SetXForwarded()
 			pr.Out.Header.Set("X-Real-Ip", clientIP(pr.In))
 			pr.Out.URL.Scheme = scheme
-			pr.Out.URL.Host = b.Name + ".upstream" // connection-pool key; the pool picks the address
+			pr.Out.URL.Host = b.Name + ".upstream" // connection-pool key; the pool dials the path's server
 			pr.Out.Host = host
 			setBackendPath(pr.Out.URL, pr.In.URL, prefix, strip)
 			// ReverseProxy's Rewrite mode strips client X-Forwarded-For/Host/Proto

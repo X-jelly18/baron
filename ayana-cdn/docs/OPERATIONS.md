@@ -130,7 +130,7 @@ vCPU in testing; the edge is not the bottleneck on typical VPS links.
 Outbound connections to a backend use one local port each, so
 `net.ipv4.ip_local_port_range` (set to 10000–65535 by the sysctl file) bounds
 the tunnels to one `host:port` at about 55,000. Spread very large deployments
-over several backend addresses or ports.
+over several paths, each with its own server address or port.
 
 A UDP session is one connected socket, so it also holds one local port and one
 descriptor; the practical ceiling for all UDP sessions of one edge is the width
@@ -151,7 +151,8 @@ run with the kernel defaults.
 
 | Symptom | Likely cause | What to do |
 |---|---|---|
-| `502`, log `all upstreams failed: … connection refused` | backend down or wrong `upstreams` | `ayana-cdn check` probes every upstream and prints the error |
+| `502`, log `server …: … connection refused` | the path's server is down or its address is wrong (no other server is tried) | `ayana-cdn check` probes the server of every path and prints the error |
+| log `path /x/ connects to one server only: using A, ignoring B` | a config from an older version lists several servers on one path | edit the path to keep one server and add the others as their own paths |
 | `502`, log `backend did not answer with HTTP` | raw backend (SSH straight on the socket, stunnel) | `"relay": "always"` |
 | `504` | backend accepted but did not answer within `timeouts.upstream_header` | check the backend; raise the timeout |
 | `404` | path does not match a backend name; `/native1x` is not `/native1` | `ayana-cdn backend ls`; debug log shows the path |

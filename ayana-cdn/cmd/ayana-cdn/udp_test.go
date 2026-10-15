@@ -275,13 +275,15 @@ func TestUDPSilentUpstreamClosed(t *testing.T) {
 	if _, err := c.Write([]byte("anyone there")); err != nil {
 		t.Fatal(err)
 	}
+	// Wait for the close itself: a session count of 0 alone is also true
+	// before the datagram has opened the session at all.
 	eventually(t, "silent upstream session reclaimed", func() bool {
-		var st statusDoc
-		_ = json.Unmarshal([]byte(e.adminGet(t, "/status")), &st)
-		return st.Connections.UDPSessions == 0
+		return strings.Contains(e.logs.String(), "reason=upstream_silent")
 	})
-	if !strings.Contains(e.logs.String(), "reason=upstream_silent") {
-		t.Fatalf("no upstream_silent log:\n%s", e.logs.String())
+	var st statusDoc
+	_ = json.Unmarshal([]byte(e.adminGet(t, "/status")), &st)
+	if st.Connections.UDPSessions != 0 {
+		t.Fatalf("%d udp sessions still open after the silent upstream was reclaimed", st.Connections.UDPSessions)
 	}
 }
 

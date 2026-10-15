@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -566,5 +567,73 @@ func TestIsValidPanelPath(t *testing.T) {
 		if isValidPanelPath(s) {
 			t.Errorf("%q should be invalid", s)
 		}
+	}
+}
+
+// The panel refuses several servers on one path, and an older config that
+// already lists them shows the ignored ones and stays editable.
+func TestPanelOneServerPerPath(t *testing.T) {
+	e := panelEdge(t, true, wsBackend("legacy", "127.0.0.1:9", "127.0.0.1:10"))
+	c := panelClient(t, e)
+	login(t, c, testPanelUser, testPanelPass).Body.Close()
+	backend := func(name string) *backendStatus {
+		for _, b := range statusDocOf(t, c).Backends {
+			if b.Name == name {
+				return &b
+			}
+		}
+		return nil
+	}
+	if b := backend("legacy"); b == nil || len(b.Upstreams) != 1 || len(b.IgnoredUpstreams) != 1 || b.IgnoredUpstreams[0] != "127.0.0.1:10" {
+		t.Fatalf("legacy backend status: %+v", b)
+	}
+	post := func(v url.Values) (int, map[string]any) { return postCtl(t, e, c, "/api/backend", v) }
+
+	code, j := post(url.Values{"action": {"add"}, "name": {"two"}, "proto": {"wss"}, "upstreams": {"127.0.0.1:1, 127.0.0.1:2"}})
+	if code == http.StatusOK || !strings.Contains(fmt.Sprint(j["error"]), "its own path") || backend("two") != nil {
+		t.Fatalf("two servers on one path: %d %v", code, j)
+	}
+	code, j = post(url.Values{"action": {"add"}, "name": {"dup"}, "proto": {"wss"}, "upstreams": {"127.0.0.1:1, 127.0.0.1:1"}, "lb": {"least_conn"}})
+	if code != http.StatusOK {
+		t.Fatalf("the same server twice is one server: %d %v", code, j)
+	}
+	if b := backend("dup"); b == nil || b.LB != "path" {
+		t.Fatalf("dup: %+v", b)
+	}
+	code, j = post(url.Values{"action": {"add"}, "name": {"dns"}, "proto": {"udp"}, "listen": {"127.0.0.1:0"},
+		"upstreams": {"127.0.0.1:53, 127.0.0.2:53"}, "lb": {"hash"}})
+	if code != http.StatusOK {
+		t.Fatalf("a udp backend may list several upstreams: %d %v", code, j)
+	}
+
+	// Unrelated changes still work on the older config.
+	if code, j = post(url.Values{"action": {"disable"}, "name": {"legacy"}}); code != http.StatusOK {
+		t.Fatalf("disable legacy: %d %v", code, j)
+	}
+	if code, j = postCtl(t, e, c, "/api/host", url.Values{"action": {"add"}, "host": {"two.example.com"}}); code != http.StatusOK {
+		t.Fatalf("domain add on an older config: %d %v", code, j)
+	}
+	raw, err := loadRaw(e.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := findBackend(raw, "legacy"); len(b.Upstreams) != 2 {
+		t.Fatalf("an unrelated save dropped the file's servers: %+v", b)
+	}
+	if b := findBackend(raw, "dup"); b.LB != "" {
+		t.Fatalf("lb %q saved for a path backend", b.LB)
+	}
+
+	// Saving the older backend as it is (both servers) is refused; one is fine.
+	code, j = post(url.Values{"action": {"update"}, "name": {"legacy"}, "proto": {"ws"}, "upstreams": {"127.0.0.1:9, 127.0.0.1:10"}})
+	if code == http.StatusOK || !strings.Contains(fmt.Sprint(j["error"]), "its own path") {
+		t.Fatalf("update with two servers: %d %v", code, j)
+	}
+	code, j = post(url.Values{"action": {"update"}, "name": {"legacy"}, "proto": {"ws"}, "upstreams": {"127.0.0.1:9"}, "lb": {"least_conn"}})
+	if code != http.StatusOK {
+		t.Fatalf("update with one server: %d %v", code, j)
+	}
+	if b := backend("legacy"); b == nil || len(b.IgnoredUpstreams) != 0 || !b.Disabled {
+		t.Fatalf("legacy after the fix: %+v", b)
 	}
 }

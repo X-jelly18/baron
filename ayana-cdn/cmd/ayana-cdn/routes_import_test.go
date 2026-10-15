@@ -12,7 +12,8 @@ func TestParseRoutes(t *testing.T) {
 	src := `{
 	  "/plain": "http://south.example",
 	  "/tls":   "https://ses.example:8443",
-	  "/pool":  ["http://10.0.0.5", "http://south2.example"],
+	  "/pool":  ["http://10.0.0.5"],
+	  "/sdup":  ["http://10.0.0.6", "http://10.0.0.6:80"],
 	  "/obj":   {"targets": ["http://1.2.3.4"], "host": "name.example", "insecure": true},
 	  "/v6":    "ws://[2001:db8::1]:8080/"
 	}`
@@ -23,7 +24,8 @@ func TestParseRoutes(t *testing.T) {
 	want := []Backend{
 		{Name: "obj", Upstream: "1.2.3.4:80", Host: "name.example", Proto: "ws", Strip: ptr(false), Insecure: true},
 		{Name: "plain", Upstream: "south.example:80", Proto: "ws", Strip: ptr(false)},
-		{Name: "pool", Upstreams: []string{"10.0.0.5:80", "south2.example:80"}, Proto: "ws", Strip: ptr(false), LB: "first"},
+		{Name: "pool", Upstream: "10.0.0.5:80", Proto: "ws", Strip: ptr(false)},
+		{Name: "sdup", Upstream: "10.0.0.6:80", Proto: "ws", Strip: ptr(false)},
 		{Name: "tls", Upstream: "ses.example:8443", Proto: "wss", Strip: ptr(false)},
 		{Name: "v6", Upstream: "[2001:db8::1]:8080", Proto: "ws", Strip: ptr(false)},
 	}
@@ -53,19 +55,22 @@ func TestParseRoutes(t *testing.T) {
 
 func TestParseRoutesErrors(t *testing.T) {
 	cases := map[string]string{
-		`{"/a/b": "http://x"}`:                       "nested",
-		`{"a": "http://x"}`:                          `start with "/"`,
-		`{"/a": "ftp://x"}`:                          "scheme",
-		`{"/a": "http://x/path"}`:                    "path in the target",
-		`{"/a": "http://x?q=1"}`:                     "path in the target",
-		`{"/a": ["http://x", "https://y"]}`:          "plain or all TLS",
-		`{"/a": {"targets": []}}`:                    "no target",
-		`{"/a": {"target": "http://x", "extra": 1}}`: "unknown field",
-		`{"/a": 42}`:                                 "must be a URL",
-		`{"/a": "http://"}`:                          "expected scheme://host",
-		`{"/healthz": "http://x"}`:                   "", // parses; validation rejects the reserved name later
-		`[]`:                                         "routes file",
-		`{"/a": "http://x"} {}`:                      "unexpected data",
+		`{"/a/b": "http://x"}`:                                    "nested",
+		`{"a": "http://x"}`:                                       `start with "/"`,
+		`{"/a": "ftp://x"}`:                                       "scheme",
+		`{"/a": "http://x/path"}`:                                 "path in the target",
+		`{"/a": "http://x?q=1"}`:                                  "path in the target",
+		`{"/a": ["http://x", "https://y"]}`:                       "its own path",
+		`{"/a": ["http://x", "http://y"]}`:                        "its own path",
+		`{"/a": {"targets": ["http://x", "http://y"]}}`:           "its own path",
+		`{"/a": {"target": "http://x", "targets": ["http://y"]}}`: "its own path",
+		`{"/a": {"targets": []}}`:                                 "no target",
+		`{"/a": {"target": "http://x", "extra": 1}}`:              "unknown field",
+		`{"/a": 42}`:                                              "must be a URL",
+		`{"/a": "http://"}`:                                       "expected scheme://host",
+		`{"/healthz": "http://x"}`:                                "", // parses; validation rejects the reserved name later
+		`[]`:                                                      "routes file",
+		`{"/a": "http://x"} {}`:                                   "unexpected data",
 	}
 	for src, want := range cases {
 		_, err := parseRoutes([]byte(src))

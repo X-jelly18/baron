@@ -35,8 +35,11 @@ Beyond the fixes, v2 adds what a production edge needs:
   6,000 connections opened at 500/s across a restart: zero failures.
 - **Live reload** (`ayana-cdn reload`, SIGHUP) that never drops an open tunnel,
   with the config validated as a whole before it is applied.
-- **Several upstreams per backend** with failover, least-connections or
-  round-robin balancing, and active health checks (tcp / tls / http / ws).
+- **Path-based routing, one server per path**: each path connects to its own
+  server and nothing else (no load balancing, no failover to another server;
+  if it is down the client gets `502` and retries). Health checks
+  (tcp / tls / http / ws) show each server's state. For several servers, give
+  each its own path.
 - **Raw relay mode** (`"relay": "always"`) for backends that answer `200` and
   then go raw, or that do not speak HTTP at all.
 - **Plain HTTP backends** on the same hostname (`"proto": "http"`), including
@@ -62,7 +65,7 @@ Beyond the fixes, v2 adds what a production edge needs:
 - **Hardened service unit**: runs unprivileged with `CAP_NET_BIND_SERVICE`,
   systemd sandboxing, `Type=notify`, `GOMEMLIMIT` at 75% of RAM.
 
-Evidence shipped with the package: 53 Go tests (`make test`), including
+Evidence shipped with the package: 120 Go tests (`make test`), including
 in-process integration tests with real TLS and backends and an end-to-end
 restart test with real processes and signals; the suite passes repeatedly
 under the race detector. See `docs/ARCHITECTURE.md` for the v1 root causes.
@@ -83,16 +86,16 @@ under the race detector. See `docs/ARCHITECTURE.md` for the v1 root causes.
 
 ```sh
 unzip ayana-cdn.zip && cd ayana-cdn
-sudo ./setup.sh          # install or upgrade, apply routes.json, probe upstreams, show status
+sudo ./setup.sh          # install or upgrade, apply routes.json, probe the servers, show status
 ```
 
 `setup.sh` asks for the domain (and the ACME email), runs the installer (add
 `--test` to run the test suite first), then asks for the routes one at a
-time: the path clients use, the target (`http://IP-or-host[:port]`,
-`https://…` for TLS, several separated by commas for failover), and optionally
-the Host header to send. It shows the routes it
-is about to apply, validates them with the same code that applies them,
-probes every upstream, and prints the client payload for each route. The
+time: the path clients use, its one target (`http://IP-or-host[:port]`, or
+`https://…` for TLS), and optionally the Host header to send. It shows the
+routes it is about to apply, validates them with the same code that applies
+them, probes the server of every path, and prints the client payload for each
+route. The
 entered routes are saved to `/etc/ayana-cdn/routes.json`; rerunning
 `setup.sh` shows the current routes and keeps them if you leave the first
 path empty. The domain you enter becomes the primary one; domains already
@@ -109,14 +112,17 @@ package's `routes.json` is an example:
 ```json
 {
   "/maibhhhh": "http://south.example.com",
-  "/s1": { "targets": ["http://192.0.2.73", "http://south2.example.com"], "host": "south2.example.com" },
+  "/s1": { "target": "http://192.0.2.73", "host": "south2.example.com" },
   "/s2": "http://ses.example.com",
   "/p6CAaNg": "https://ses.example.com"
 }
 ```
 
-A route with several targets tries them in order (the first is the origin
-reached directly, the rest are failover). A routes file can be applied at any
+Each path connects to exactly one target. To use several servers, give each
+its own path (`/s1`, `/s1-2`, ...); a routes file with several targets on one
+path is refused. A config from an older version that lists several servers on
+one path still loads, but only the first is used, with a warning in the log,
+`ayana-cdn check` and the panel. A routes file can be applied at any
 time with `sudo ayana-cdn routes import FILE -replace`; `config/config.json`
 holds the same example routes in the full config format. Individual backends
 can also be managed from the shell:
@@ -202,7 +208,8 @@ sudo ayana-cdn backend add wg 10.0.0.2:51820 -proto udp -listen :51820   # WireG
 
 Datagrams from one client address are relayed as independent sessions, dead
 sessions are reclaimed (idle, ICMP-unreachable, or no reply within
-`udp_reply`), and `lb: hash` keeps a client on the same upstream. See
+`udp_reply`), and `lb: hash` keeps a client on the same upstream (UDP
+backends are reached by port, not by path, and may list several). See
 `docs/CONFIG.md` and `config/examples/udp.json`.
 
 ## Client settings
@@ -234,8 +241,8 @@ sent itself.
     setup.sh               one command: install/upgrade, prompt for the routes, check, status
     routes.json            example routes file, in the Cloud Run relay's format
     cmd/ayana-cdn/         the program and its tests (testdata/v1-config.json is v1's shipped config)
-    config/config.json     the same routes as a full config; config/examples/ for failover, raw
-                           tunnels, HTTP backends, certificate files, and the nginx front door
+    config/config.json     the same routes as a full config; config/examples/ for one server per
+                           path, raw tunnels, HTTP backends, certificate files, and the nginx front door
     deploy/install.sh      install or upgrade; --test, --no-sysctl, --no-start, --go-root DIR
     deploy/uninstall.sh    remove (keeps config and certificates unless --purge)
     deploy/ayana-cdn.service, sysctl-99-ayana-cdn.conf, frontdoor.conf, ayana-cdn.bash-completion

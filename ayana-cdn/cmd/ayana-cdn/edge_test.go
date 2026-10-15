@@ -198,13 +198,50 @@ func TestForwardingHeadersAndPathStrip(t *testing.T) {
 	}
 }
 
-// ---- upstreams, failover, capacity ----------------------------------------------------------
+// ---- one server per path, capacity -----------------------------------------------------------
 
-func TestFailoverToSecondUpstream(t *testing.T) {
+// An older config may list several servers on one path. It must still load
+// (an upgrade never stops the edge), but the path connects to its first server
+// only: when that one is down the client gets 502, and the second server is
+// never contacted.
+func TestPathConnectsOnlyToItsServer(t *testing.T) {
 	t.Parallel()
-	b := wsBackend("ha", refusedAddr(t), startEcho(t, echoOpts{}))
-	b.LB = "first"
+	dead := refusedAddr(t)
+	other, accepted := countingAddr(t)
+	b := wsBackend("ha", dead, other)
+	b.LB = "first" // a failover policy from an older version
 	e := startEdge(t, newEdgeConfig(t, b))
+	for i := 0; i < 3; i++ {
+		c := e.dial(t)
+		io.WriteString(c, upgradeReq("/ha/")+"hi\n") //nolint:errcheck
+		if code, _ := readStatus(t, bufio.NewReader(c)); code != 502 {
+			t.Fatalf("request %d: status %d, want 502 (no failover)", i, code)
+		}
+		c.Close()
+	}
+	var st statusDoc
+	if err := json.Unmarshal([]byte(e.adminGet(t, "/status")), &st); err != nil {
+		t.Fatal(err)
+	}
+	bs := st.Backends[0]
+	if len(bs.Upstreams) != 1 || bs.Upstreams[0].Addr != dead || bs.Upstreams[0].DialErr != 3 {
+		t.Fatalf("the path must have exactly its first server: %+v", bs.Upstreams)
+	}
+	if bs.LB != "path" || len(bs.IgnoredUpstreams) != 1 || bs.IgnoredUpstreams[0] != other {
+		t.Fatalf("lb %q, ignored_upstreams %v", bs.LB, bs.IgnoredUpstreams)
+	}
+	if accepted.Load() != 0 {
+		t.Fatalf("the second server was contacted %d times", accepted.Load())
+	}
+	if !strings.Contains(e.logs.String(), "connects to one server only") {
+		t.Fatalf("no warning about the ignored server in the log:\n%s", e.logs.String())
+	}
+}
+
+func TestPathUsesItsFirstServer(t *testing.T) {
+	t.Parallel()
+	other, accepted := countingAddr(t)
+	e := startEdge(t, newEdgeConfig(t, wsBackend("ha", startEcho(t, echoOpts{}), other)))
 	for i := 0; i < 3; i++ {
 		c := e.dial(t)
 		io.WriteString(c, upgradeReq("/ha/")+"hi\n") //nolint:errcheck
@@ -217,13 +254,8 @@ func TestFailoverToSecondUpstream(t *testing.T) {
 		}
 		c.Close()
 	}
-	var st statusDoc
-	if err := json.Unmarshal([]byte(e.adminGet(t, "/status")), &st); err != nil {
-		t.Fatal(err)
-	}
-	ups := st.Backends[0].Upstreams
-	if ups[0].Healthy || ups[0].DialErr == 0 || ups[1].DialOK != 3 {
-		t.Fatalf("upstream state: %+v", ups)
+	if accepted.Load() != 0 {
+		t.Fatalf("the second server was contacted %d times; a path never balances", accepted.Load())
 	}
 }
 

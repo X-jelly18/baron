@@ -144,6 +144,10 @@ main{max-width:1200px;margin:0 auto;padding:18px}
 .ups .u .a{flex:1;word-break:break-all}
 .classes{display:flex;gap:6px;flex-wrap:wrap}
 .cl{font-size:11px;padding:2px 7px;border-radius:6px;background:var(--bg3);color:var(--fg2)}
+.srv{font-size:12.5px;color:var(--fg2);word-break:break-all}
+.bk.warn{border-color:color-mix(in srgb,var(--warn) 60%,var(--bd))}
+.wbox{background:color-mix(in srgb,var(--warn) 13%,transparent);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);
+  border-radius:8px;padding:7px 10px;font-size:12.5px}
 
 /* tables (domains, IPs) */
 table{width:100%;border-collapse:collapse;background:var(--bg2);border:1px solid var(--bd);
@@ -166,6 +170,7 @@ form.add input,form.add select{padding:7px 9px;border-radius:8px;border:1px soli
 form.add input:focus,form.add select:focus,.login input:focus{outline:2px solid color-mix(in srgb,var(--accent) 55%,transparent);outline-offset:0;border-color:var(--accent)}
 form.add input[type=text]{min-width:150px}
 .hint{color:var(--muted);font-size:12px;margin:2px 0 10px}
+form.add .f.hide{display:none}
 
 /* login */
 .login{max-width:340px;margin:13vh auto;background:var(--bg2);border:1px solid var(--bd);
@@ -415,6 +420,12 @@ function flash(msg,ok){var m=$("msg");m.textContent="";var d=el("div",msg,ok?"ok
 function field(label,node){var f=el("div",null,"f");f.appendChild(el("label",label));f.appendChild(node);return f}
 function sel(opts,val){var s=document.createElement("select");opts.forEach(function(o){var op=document.createElement("option");op.value=o;op.textContent=o;if(o===val)op.selected=true;s.appendChild(op)});return s}
 function inp(ph,val){var i=document.createElement("input");i.type="text";i.placeholder=ph||"";if(val!=null)i.value=val;return i}
+// A path connects to exactly one server. distinctList counts servers the way
+// the edge does (trimmed, duplicates once); ignored_upstreams are the extra
+// servers an older config still lists on a path, which are never used.
+function distinctList(s){var seen={},out=[];String(s||"").split(",").forEach(function(p){p=p.trim();if(p&&!seen[p]){seen[p]=1;out.push(p)}});return out}
+function addrs(b){return (b.upstreams||[]).map(function(u){return u.addr})}
+function ignoredUps(b){return b.proto==="udp"?[]:(b.ignored_upstreams||[])}
 
 function renderControls(){
   var c=$("controls");c.textContent="";
@@ -425,7 +436,7 @@ function renderControls(){
   c.appendChild(b);
   if(!$("domainCtl").firstChild){
     var ad=el("button","+ Add domain","btn sm");ad.addEventListener("click",domainForm);$("domainCtl").appendChild(ad);
-    var ab=el("button","+ Add backend / path","btn sm");ab.addEventListener("click",function(){backendForm(null)});$("backendCtl").appendChild(ab);
+    var ab=el("button","+ Add path","btn sm");ab.addEventListener("click",function(){backendForm(null)});$("backendCtl").appendChild(ab);
   }
 }
 
@@ -447,29 +458,44 @@ function backendForm(bk){
   var f=document.createElement("form");f.className="add";
   var name=inp("path (e.g. native1 or app)",editing?bk.name:"");if(editing)name.disabled=true;
   var proto=sel(["wss","ws","https","http","sse","udp"],editing?bk.proto:"wss");
-  var ups=inp("host:port, host:port",editing?(bk.upstreams||[]).map(function(u){return u.addr}).join(", "):"");
+  var ups=inp("host:port",editing?addrs(bk).concat(ignoredUps(bk)).join(", "):"");
   var host=inp("Host header (optional)",editing?(bk.host||""):"");
   var listen=inp(":36712 (udp only)",editing?(bk.listen||""):"");
   var strip=sel(["true","false"],editing?String(bk.strip):"true");
   var relay=sel(["upgrade","always"],editing?(bk.relay||"upgrade"):"upgrade");
-  var lb=sel(["least_conn","round_robin","first","hash"],editing?(bk.lb||"least_conn"):"least_conn");
+  var lb=sel(["hash","least_conn","round_robin","first"],editing&&bk.proto==="udp"?(bk.lb||"hash"):"hash");
   var insecure=sel(["false","true"],editing?String(bk.insecure):"false");
+  var fUps=field("Server",ups),fLB=field("LB (udp)",lb);
   f.appendChild(field("Path name",name));
   f.appendChild(field("Proto",proto));
-  f.appendChild(field("Upstreams",ups));
+  f.appendChild(fUps);
   f.appendChild(field("Host",host));
   f.appendChild(field("Listen (udp)",listen));
   f.appendChild(field("Strip path",strip));
   f.appendChild(field("Relay",relay));
-  f.appendChild(field("LB",lb));
+  f.appendChild(fLB);
   f.appendChild(field("Insecure TLS",insecure));
   var save=el("button",editing?"Save":"Add","btn primary sm");save.type="submit";
   var cancel=el("button","Cancel","btn sm");cancel.type="button";cancel.addEventListener("click",function(){wrap.textContent=""});
   f.appendChild(field(" ",save));f.appendChild(field(" ",cancel));
-  var hint=el("div","Local service on this VPS: set Proto = http (or https) and Upstreams = 127.0.0.1:PORT. Tunnels: wss/ws. Clients reach it at /"+(editing?bk.name:"<name>")+"/.","hint");
+  var hint=el("div","","hint");
+  var pathName=editing?bk.name:"<name>";
+  function sync(){
+    var udp=proto.value==="udp",n=distinctList(ups.value).length;
+    fLB.classList.toggle("hide",!udp);
+    fUps.firstChild.textContent=udp?"Upstreams":"Server";
+    ups.placeholder=udp?"host:port, host:port":"host:port";
+    hint.className="hint";
+    if(udp){hint.textContent="UDP backends are reached on their own listen port, not by path, and may list several upstreams; LB picks between them."}
+    else if(n>1){hint.className="hint wbox";hint.textContent="A path connects to exactly one server, but "+n+" are listed. Keep one here and give each other server its own path."}
+    else{hint.textContent="This path connects to exactly one server: no load balancing, no failover (if it is down, clients get an error and retry). Local service on this VPS: Proto = http (or https), Server = 127.0.0.1:PORT. Tunnels: wss/ws. Clients reach it at /"+pathName+"/."}
+  }
+  proto.addEventListener("change",sync);ups.addEventListener("input",sync);sync();
   f.addEventListener("submit",function(e){e.preventDefault();
+    var udp=proto.value==="udp";
+    if(!udp&&distinctList(ups.value).length>1){flash("error: a path connects to exactly one server; give each server its own path",false);ups.focus();return}
     post("/api/backend",{action:editing?"update":"add",name:name.value,proto:proto.value,upstreams:ups.value,
-      host:host.value,listen:listen.value,strip:strip.value,relay:relay.value,lb:lb.value,insecure:insecure.value},
+      host:host.value,listen:listen.value,strip:strip.value,relay:relay.value,lb:udp?lb.value:"",insecure:insecure.value},
       function(j){flash(j.ok?j.message:("error: "+j.error),j.ok);if(j.ok)wrap.textContent="";tick()});
   });
   wrap.appendChild(f);wrap.appendChild(hint);name.focus();
@@ -564,13 +590,21 @@ function upRows(box,b){
     box.appendChild(row);
     if(!u.healthy&&u.last_error)box.appendChild(el("div",u.last_error,"muted"));
   });
+  ignoredUps(b).forEach(function(a){
+    var row=el("div",null,"u");
+    row.appendChild(el("span","not used","pill off"));
+    row.appendChild(el("span",a,"a"));
+    box.appendChild(row);
+  });
+  box.appendChild(el("div",b.proto==="udp"?("lb "+(b.lb||"hash")):"one server per path: no load balancing, no failover","muted"));
 }
 function clsRow(box,b){
   box.textContent="";
   var cls=b.responses||{};Object.keys(cls).forEach(function(k){box.appendChild(el("span",k+": "+cls[k],"cl"))});
 }
 function buildCard(b){
-  var refs={},card=el("div",null,"bk"+(b.disabled?" dis":""));
+  var ig=ignoredUps(b);
+  var refs={},card=el("div",null,"bk"+(b.disabled?" dis":"")+(ig.length?" warn":""));
   var hd=el("div",null,"bk-h");
   hd.appendChild(el("span",b.name,"nm"));
   hd.appendChild(el("span",b.listen?("udp "+b.listen):b.path,"pt"));
@@ -578,6 +612,8 @@ function buildCard(b){
   hd.appendChild(el("span",b.proto+(b.relay==="always"?" raw":""),"pill neutral"));
   var sp0=statePill(b);refs.state=el("span",sp0.t,sp0.c);hd.appendChild(refs.state);
   card.appendChild(hd);
+  if(b.proto!=="udp")card.appendChild(el("div","→ "+(addrs(b)[0]||"?"),"srv"));
+  if(ig.length)card.appendChild(el("div","Only "+(addrs(b)[0]||"the first server")+" is used: this path lists "+(ig.length+1)+" servers and a path connects to one ("+ig.join(", ")+" not used). Edit it to keep one server, then add the others as their own paths.","wbox"));
   var rb=el("div",null,"ratebar");
   var ru=el("div",null,"r");refs.rup=el("span","","n up-c");ru.appendChild(refs.rup);ru.appendChild(el("span","Mbps ↑ up","l"));
   var rd=el("div",null,"r");refs.rdown=el("span","","n down-c");rd.appendChild(refs.rdown);rd.appendChild(el("span","Mbps ↓ down","l"));
@@ -625,10 +661,10 @@ var bkState={order:"",cards:{}};
 function renderBackends(d){
   var wrap=$("backends"),list=d.backends||[];
   // The order key triggers a full rebuild. It includes every statically-rendered
-  // field (name, proto, relay, path/listen) so an Edit that changes them refreshes
-  // the header and the packets-vs-cap-rejects label; rate/totals/spark change every
-  // tick and are updated in place without a rebuild.
-  var order=list.map(function(b){return [b.name,b.proto,b.relay,b.listen||b.path,expanded[b.name]?1:0,b.disabled?1:0].join("~")}).join("\u0001")+"|"+APP.control;
+  // field (name, proto, relay, path/listen, the server and any servers a path
+  // does not use) so an Edit that changes them refreshes the card; rate/totals/
+  // spark change every tick and are updated in place without a rebuild.
+  var order=list.map(function(b){return [b.name,b.proto,b.relay,b.listen||b.path,addrs(b)[0]||"",ignoredUps(b).join(","),expanded[b.name]?1:0,b.disabled?1:0].join("~")}).join("\u0001")+"|"+APP.control;
   if(bkState.order!==order){
     wrap.textContent="";bkState.cards={};
     var grid=el("div",null,"bgrid");

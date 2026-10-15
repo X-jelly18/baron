@@ -50,7 +50,7 @@ For `ws`/`wss` backends every request is a tunnel (`tunnel.go`):
    buffered reader. **Any bytes the client sent after the request head are in
    that buffer**; they are forwarded to the backend right after the request.
 2. The request head is rewritten (backend `Host`, forwarding headers, stripped
-   path) and written to a backend connection from the pool (`upstream.go`).
+   path) and written to a connection to the path's one server (`upstream.go`).
 3. The backend's response head is read raw (`httphead.go`). Any status `101`
    switches to relay mode, whatever headers it carries. Bytes that arrived
    together with the head (a banner) are forwarded after it. A non-`101`
@@ -66,15 +66,18 @@ For `ws`/`wss` backends every request is a tunnel (`tunnel.go`):
    can reason about them; `net/http` does not track hijacked connections.
 
 `relay: always` skips step 3 and relays from the first byte. HTTP backends go
-through `httpproxy.go`, a `ReverseProxy` that dials from the same pool,
+through `httpproxy.go`, a `ReverseProxy` that dials the same server,
 flushes every chunk (so SSE works) and records the status class; upgrade
 requests to an HTTP backend still take the tunnel path.
 
-The upstream pool orders upstreams by the configured policy with unhealthy
-ones last, tries them in turn within the connect budget, tracks active
-connections and dial results, and marks an upstream down after consecutive
-dial failures. `health.go` runs the active checks. A pool survives reloads:
-unchanged upstreams keep their state.
+Routing is by path, and a path connects to exactly one server: its pool holds
+that server only, and a dial goes there or fails with a `502` (no load
+balancing, no failover to another server). The pool tracks active connections
+and dial results and marks the server down after consecutive dial failures;
+`health.go` runs the active checks. Health only feeds `status`, the panel and
+the metrics: the server is dialed even while marked down, so service resumes
+the moment it is back. Only a udp pool holds several upstreams and chooses
+between them. A pool survives reloads: an unchanged server keeps its state.
 
 ## The data path of a UDP session
 
@@ -203,17 +206,17 @@ replaced `/usr/local/go`, and shipped a two-year-old `x/crypto`.
 
 ## Tests
 
-`go test ./cmd/ayana-cdn` runs 53 tests in about five seconds. Unit tests
+`go test ./cmd/ayana-cdn` runs 120 tests in about five seconds. Unit tests
 cover config loading and validation (including v1's shipped config, verbatim
 in `testdata/`), routing, URI rewriting, the limiter, PROXY protocol v1/v2,
-head parsing, upstream ordering and failover, and the CLI. Integration tests
-start a full edge in-process with a generated certificate and real TCP
-backends, and drive it with raw client bytes: early data, Python-style `101`,
-banners, relay modes, forwarded headers, failover, capacity, SNI fallback,
-half-close, idle timeout, reload, stop, a 19 MB integrity run through the
-adaptive relay, HTTP proxying with streaming, PROXY protocol, per-IP limits
-and metrics. `TestZeroDowntimeRestart` re-executes the test binary as the
-edge, becomes a child subreaper like systemd, fakes the notify socket, and
-checks a failed restart, a successful one, the surviving tunnel, the old
-process's exit and the new one's stop while four clients connect
-continuously. The whole suite passes repeatedly under `-race`.
+head parsing, one server per path, udp upstream ordering, and the CLI.
+Integration tests start a full edge in-process with a generated certificate
+and real TCP backends, and drive it with raw client bytes: early data,
+Python-style `101`, banners, relay modes, forwarded headers, path pinning,
+capacity, SNI fallback, half-close, idle timeout, reload, stop, a 19 MB
+integrity run through the adaptive relay, HTTP proxying with streaming, PROXY
+protocol, per-IP limits and metrics. `TestZeroDowntimeRestart` re-executes the
+test binary as the edge, becomes a child subreaper like systemd, fakes the
+notify socket, and checks a failed restart, a successful one, the surviving
+tunnel, the old process's exit and the new one's stop while four clients
+connect continuously. The whole suite passes repeatedly under `-race`.
