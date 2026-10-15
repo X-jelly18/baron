@@ -32,6 +32,13 @@
 
 ### Fixed
 
+- **Editing a backend in the panel keeps the settings the form does not
+  show.** Saving the Edit form used to drop `max_conns`, `idle_timeout` and,
+  while the proto stays the same, an explicit `tls` and the `health_check`.
+- **The panel's Edit button opens the backend as it is now**, not as it was
+  when its card was drawn, so a second edit no longer reverts the first.
+- `ayana-cdn backend set NAME -lb path` writes nothing (a path has no policy
+  to choose), so the file stays readable by the previous version.
 - `TestUDPSilentUpstreamClosed` could pass its wait before the session existed
   and then miss the log line under a loaded test run; it now waits for the
   close itself.

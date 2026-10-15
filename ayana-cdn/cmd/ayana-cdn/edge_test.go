@@ -210,12 +210,20 @@ func TestPathConnectsOnlyToItsServer(t *testing.T) {
 	other, accepted := countingAddr(t)
 	b := wsBackend("ha", dead, other)
 	b.LB = "first" // a failover policy from an older version
-	e := startEdge(t, newEdgeConfig(t, b))
+	h := wsBackend("web", dead, other)
+	h.Proto, h.LB = "http", "round_robin" // HTTP requests go through the same pool
+	e := startEdge(t, newEdgeConfig(t, b, h))
 	for i := 0; i < 3; i++ {
 		c := e.dial(t)
 		io.WriteString(c, upgradeReq("/ha/")+"hi\n") //nolint:errcheck
 		if code, _ := readStatus(t, bufio.NewReader(c)); code != 502 {
-			t.Fatalf("request %d: status %d, want 502 (no failover)", i, code)
+			t.Fatalf("tunnel %d: status %d, want 502 (no failover)", i, code)
+		}
+		c.Close()
+		c = e.dial(t)
+		io.WriteString(c, "GET /web/x HTTP/1.1\r\nHost: cdn.example\r\n\r\n") //nolint:errcheck
+		if code, _ := readStatus(t, bufio.NewReader(c)); code != 502 {
+			t.Fatalf("http request %d: status %d, want 502 (no failover)", i, code)
 		}
 		c.Close()
 	}

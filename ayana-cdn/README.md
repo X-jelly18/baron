@@ -55,10 +55,10 @@ Beyond the fixes, v2 adds what a production edge needs:
 - **Observability**: `ayana-cdn status`, Prometheus metrics, JSON status,
   structured logs with one line per tunnel (bytes each way, duration, why it
   ended), certificate expiry in the status output.
-- **Tools**: `check` validates the config and probes every upstream, `bench`
-  load-tests tunnels with SNI control and early data, `echo-backend` is a test
-  backend that can imitate Python-style proxies, `routes import` applies a
-  Cloud Run-style `routes.json`.
+- **Tools**: `check` validates the config and probes the server of every path,
+  `bench` load-tests tunnels with SNI control and early data, `echo-backend`
+  is a test backend that can imitate Python-style proxies, `routes import`
+  applies a Cloud Run-style `routes.json`.
 - **Less memory per tunnel**: about 35 KiB resident per idle TLS tunnel
   against 57 KiB in v1 (2,000 open tunnels, same machine), with adaptive
   4 KiB / 32 KiB relay buffers.
@@ -155,7 +155,7 @@ release into `/usr/local/go`; v2 uses a private toolchain under
 | Command | What it does |
 |---|---|
 | `ayana-cdn status [-json]` | Live view: connections, tunnels per backend with bytes, upstream health, certificate expiry, memory. |
-| `ayana-cdn check [-no-dial]` | Validate the config, show the certificate, probe every upstream (exit code 1 if any fails). |
+| `ayana-cdn check [-no-dial]` | Validate the config, show the certificate, probe the server of every path and each udp upstream (exit code 1 if one fails). |
 | `ayana-cdn reload` | Apply config changes without dropping anything. Rejected configs leave the running one in place. |
 | `ayana-cdn restart` | Replace the running process (new binary, or a listen/TLS-mode change) without dropping connections. |
 | `ayana-cdn backend ls / add / set / rm / enable / disable` | Edit backends safely from the shell. `ayana-cdn backend` prints all flags. |

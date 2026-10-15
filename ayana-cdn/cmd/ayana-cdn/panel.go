@@ -437,7 +437,13 @@ func (s *Server) applyBackendEdit(action, name string, r *http.Request) (string,
 			if err != nil {
 				return err
 			}
-			nb.Disabled = b.Disabled // preserve the enabled/disabled state across an edit
+			// Keep what the form does not carry: the enabled state, the caps,
+			// and (while the proto is unchanged) the TLS and health-check
+			// settings, which a proto change would otherwise contradict.
+			nb.Disabled, nb.MaxConns, nb.IdleTimeout = b.Disabled, b.MaxConns, b.IdleTimeout
+			if normProto(nb.Proto) == normProto(b.Proto) {
+				nb.TLS, nb.HealthCheck = b.TLS, b.HealthCheck
+			}
 			*b = nb
 			msg = "updated backend " + name
 		default:

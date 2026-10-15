@@ -220,7 +220,11 @@ func (f *backendFlags) apply(b *Backend) {
 		b.Disabled = f.disabled.v
 	}
 	if f.lb.set {
-		b.LB = f.lb.v
+		if v := strings.ToLower(strings.TrimSpace(f.lb.v)); normProto(b.Proto) == "udp" || (v != "path" && v != "") {
+			b.LB = f.lb.v // enforcePath refuses a policy on a path backend
+		}
+		// -lb path on a path backend: nothing to choose, so the file keeps
+		// what it has (an older binary still reads it after a rollback).
 	}
 	if f.relay.set {
 		b.Relay = f.relay.v
@@ -317,8 +321,8 @@ func (f *backendFlags) enforcePath(b *Backend, servers bool) error {
 	if normProto(b.Proto) == "udp" {
 		return nil
 	}
-	if f.lb.set && strings.ToLower(strings.TrimSpace(f.lb.v)) != "path" {
-		return fmt.Errorf("backend %q: -lb %s applies only to udp backends; a path connects to its one server", b.Name, f.lb.v)
+	if v := strings.ToLower(strings.TrimSpace(f.lb.v)); f.lb.set && v != "path" && v != "" {
+		return fmt.Errorf("backend %q: -lb %q applies only to udp backends; a path connects to its one server", b.Name, f.lb.v)
 	}
 	if servers {
 		if err := checkOneServer(b); err != nil {

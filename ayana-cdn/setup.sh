@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One command for this VPS: install or upgrade ayana-cdn, ask for the routes
-# (client path -> backend), apply them, probe every upstream, show the status
-# and print the client payload for each route.
+# (client path -> server), apply them, probe the server of every path, show
+# the status and print the client payload for each route.
 #
 #   sudo ./setup.sh                    interactive: prompts for the routes
 #   sudo ./setup.sh --routes FILE      apply a routes.json instead of prompting
@@ -175,13 +175,20 @@ prompt)
 		prompt_routes
 	elif [ -f "$ROUTES" ]; then
 		echo "==> no terminal: reapplying $ROUTES"
-		if ! apply_routes "$ROUTES"; then
+		err=$(mktemp)
+		if ! apply_routes "$ROUTES" 2>"$err"; then
+			cat "$err" >&2
+			if ! grep -q 'connects to exactly one server' "$err"; then
+				rm -f "$err"
+				exit 1
+			fi
 			# An older setup.sh could save several targets for one path, which a
 			# path no longer takes. Keep the running routes (each path uses its
 			# first server) instead of stopping the upgrade here.
-			echo "warning: $ROUTES was not applied (see above); keeping the routes in $CONF." >&2
+			echo "warning: $ROUTES was not applied; keeping the routes in $CONF." >&2
 			echo "         Give each server its own path, then run: sudo ./setup.sh --routes FILE" >&2
 		fi
+		rm -f "$err"
 	else
 		echo "==> no terminal and no $ROUTES: keeping the routes in $CONF" >&2
 	fi ;;

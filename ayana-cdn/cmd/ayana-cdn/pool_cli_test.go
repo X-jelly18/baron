@@ -331,6 +331,14 @@ func TestBackendCommandsOneServerPerPath(t *testing.T) {
 	if b := rawBackend("legacy"); len(b.Upstreams) != 2 || b.Host != "h.example.com" {
 		t.Fatalf("legacy = %+v", b)
 	}
+	// -lb path names no policy, so the file keeps the older one (still readable
+	// by the previous version after a rollback).
+	if err := run("set", "legacy", "-lb", "path"); err != nil {
+		t.Fatal(err)
+	}
+	if b := rawBackend("legacy"); b.LB != "least_conn" {
+		t.Fatalf("lb %q written; an older binary would refuse the file", b.LB)
+	}
 	// ...but new servers are one per path, and fixing it drops the old policy.
 	refused("its own path", "set", "legacy", "-upstreams", "a.example.com:443,c.example.com:443")
 	if err := run("set", "legacy", "-upstreams", "a.example.com:443"); err != nil {

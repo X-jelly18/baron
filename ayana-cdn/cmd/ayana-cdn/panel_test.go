@@ -573,7 +573,10 @@ func TestIsValidPanelPath(t *testing.T) {
 // The panel refuses several servers on one path, and an older config that
 // already lists them shows the ignored ones and stays editable.
 func TestPanelOneServerPerPath(t *testing.T) {
-	e := panelEdge(t, true, wsBackend("legacy", "127.0.0.1:9", "127.0.0.1:10"))
+	legacy := wsBackend("legacy", "127.0.0.1:9", "127.0.0.1:10")
+	legacy.MaxConns, legacy.IdleTimeout = 5000, Duration(5*time.Minute)
+	legacy.TLS, legacy.HealthCheck = ptr(false), &HealthCheck{Type: "off"}
+	e := panelEdge(t, true, legacy)
 	c := panelClient(t, e)
 	login(t, c, testPanelUser, testPanelPass).Body.Close()
 	backend := func(name string) *backendStatus {
@@ -635,5 +638,14 @@ func TestPanelOneServerPerPath(t *testing.T) {
 	}
 	if b := backend("legacy"); b == nil || len(b.IgnoredUpstreams) != 0 || !b.Disabled {
 		t.Fatalf("legacy after the fix: %+v", b)
+	}
+	// The edit keeps what the form does not carry.
+	raw, err = loadRaw(e.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := findBackend(raw, "legacy"); b.MaxConns != 5000 || b.IdleTimeout.D() != 5*time.Minute ||
+		b.TLS == nil || *b.TLS || b.HealthCheck == nil || b.HealthCheck.Type != "off" || b.LB != "" {
+		t.Fatalf("the panel edit dropped settings: %+v", b)
 	}
 }

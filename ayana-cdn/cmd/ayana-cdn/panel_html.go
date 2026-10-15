@@ -633,7 +633,10 @@ function buildCard(b){
   if(APP.control){
     var tg=el("button",b.disabled?"Enable":"Disable","btn sm"+(b.disabled?"":" danger"));
     (function(n,dis){tg.addEventListener("click",function(){backendAction(dis?"enable":"disable",n)})})(b.name,b.disabled);
-    var ed=el("button","Edit","btn sm");(function(bb){ed.addEventListener("click",function(){backendForm(bb)})})(b);
+    // Edit opens the backend as it is now, not as it was when the card was built.
+    var ed=el("button","Edit","btn sm");(function(n){ed.addEventListener("click",function(){
+      var cur=((lastStatus&&lastStatus.backends)||[]).filter(function(x){return x.name===n})[0];
+      if(cur)backendForm(cur)})})(b.name);
     var rm=el("button","Remove","btn sm");(function(n){rm.addEventListener("click",function(){if(confirm("Remove backend "+n+"?"))backendAction("remove",n)})})(b.name);
     act.appendChild(tg);act.appendChild(ed);act.appendChild(rm);
   }
