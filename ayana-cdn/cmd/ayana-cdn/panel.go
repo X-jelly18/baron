@@ -9,12 +9,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -560,9 +562,20 @@ func (s *Server) panelEditConfig(mutate func(*Config) error) error {
 		return saveRaw(s.cfgPath, raw)
 	})
 	if err != nil {
-		return err
+		return explainConfigWriteError(err)
 	}
 	return s.Reload()
+}
+
+// explainConfigWriteError adds the fix to the one write failure the panel
+// cannot work around: its sandbox shows the config directory read-only,
+// which happens when the directory was replaced while the edge ran.
+func explainConfigWriteError(err error) error {
+	if errors.Is(err, syscall.EROFS) {
+		return errPanel(errString(err) + ". The edge's sandbox is out of date (its config directory was replaced while " +
+			"it ran); restart it fully, then retry: sudo systemctl restart ayana-cdn")
+	}
+	return err
 }
 
 // ---- sessions + CSRF --------------------------------------------------------

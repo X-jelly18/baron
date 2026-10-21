@@ -537,6 +537,40 @@ func runningPID(pidFile string) (int, string) {
 	return 0, ""
 }
 
+// staleSandbox returns the first of dirs that is writable here but read-only
+// to the process whose root is procRoot (/proc/PID/root). systemd binds the
+// config and certificate directories writable into the service's otherwise
+// read-only sandbox when it starts; if one is replaced afterwards (a restore
+// moves the old one aside), the writable bind follows the old directory and
+// the service sees the new one read-only, and so does every process it
+// starts, a zero-downtime restart included. Only a full restart sets the
+// sandbox up again. Directories it cannot inspect are skipped.
+func staleSandbox(procRoot string, dirs ...string) string {
+	const stRdonly = 0x1 // ST_RDONLY in statfs flags
+	readOnly := func(p string) (bool, bool) {
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(p, &st); err != nil {
+			return false, false
+		}
+		return st.Flags&stRdonly != 0, true
+	}
+	for _, d := range dirs {
+		hostRO, ok1 := readOnly(d)
+		seenRO, ok2 := readOnly(filepath.Join(procRoot, d))
+		if ok1 && ok2 && !hostRO && seenRO {
+			return d
+		}
+	}
+	return ""
+}
+
+func absPath(p string) string {
+	if a, err := filepath.Abs(p); err == nil {
+		return a
+	}
+	return p
+}
+
 func signalReload(pidFile string) string {
 	pid, how := runningPID(pidFile)
 	if pid == 0 {
@@ -652,6 +686,15 @@ func cmdRestart(args []string) error {
 		if d.Draining {
 			return errors.New("the running process is already draining; wait a moment and retry")
 		}
+	}
+	dirs := []string{filepath.Dir(absPath(*cfgPath))}
+	if cfg.TLS.Mode == "acme" {
+		dirs = append(dirs, cfg.TLS.CacheDir)
+	}
+	if d := staleSandbox(fmt.Sprintf("/proc/%d/root", pid), dirs...); d != "" {
+		return fmt.Errorf("the running edge (pid %d) sees %s read-only: that directory was replaced after systemd set up "+
+			"its sandbox, so it cannot write there (panel changes, certificate renewals), and a zero-downtime restart would "+
+			"keep that view. Restart it fully instead (clients reconnect once): sudo systemctl restart ayana-cdn", pid, d)
 	}
 	if err := syscall.Kill(pid, syscall.SIGUSR2); err != nil {
 		return fmt.Errorf("signal pid %d: %w", pid, err)

@@ -22,7 +22,7 @@ import (
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
-var version = "2.7.3"
+var version = "2.7.4"
 
 const defaultPIDFile = "/run/ayana-cdn/pid"
 

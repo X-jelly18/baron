@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -373,5 +376,48 @@ func TestCheckWarnsAboutIgnoredServers(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "connects to one server only: using a.example.com:443, ignoring b.example.com:443") {
 		t.Fatalf("no warning in:\n%s", out)
+	}
+}
+
+// A directory replaced after the edge started (a restore moves the old one
+// aside) is read-only in the edge's sandbox: restart must notice. The sandbox
+// is imitated with a read-only bind mount, which needs root.
+func TestStaleSandbox(t *testing.T) {
+	host := t.TempDir()
+	dir := filepath.Join(host, "etc", "ayana-cdn")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if d := staleSandbox("/", dir); d != "" {
+		t.Fatalf("a writable directory reported stale: %s", d)
+	}
+	fakeRoot := t.TempDir() // the sandbox's view of the same path
+	view := filepath.Join(fakeRoot, dir)
+	if err := os.MkdirAll(view, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mount(dir, view, "", syscall.MS_BIND, ""); err != nil {
+		t.Skipf("cannot bind-mount here: %v", err)
+	}
+	defer syscall.Unmount(view, 0) //nolint:errcheck
+	if d := staleSandbox(fakeRoot, dir); d != "" {
+		t.Fatalf("a writable sandbox view reported stale: %s", d)
+	}
+	if err := syscall.Mount("", view, "", syscall.MS_REMOUNT|syscall.MS_BIND|syscall.MS_RDONLY, ""); err != nil {
+		t.Skipf("cannot remount read-only here: %v", err)
+	}
+	if d := staleSandbox(fakeRoot, filepath.Join(host, "missing"), dir); d != dir {
+		t.Fatalf("staleSandbox = %q, want %q", d, dir)
+	}
+}
+
+func TestExplainConfigWriteError(t *testing.T) {
+	err := explainConfigWriteError(fmt.Errorf("lock config: %w", &os.PathError{Op: "open", Path: "/etc/ayana-cdn/config.json.lock", Err: syscall.EROFS}))
+	if err == nil || !strings.Contains(err.Error(), "sudo systemctl restart ayana-cdn") || !strings.Contains(err.Error(), "read-only file system") {
+		t.Fatalf("got %v", err)
+	}
+	other := errors.New("change rejected: x")
+	if explainConfigWriteError(other) != other {
+		t.Fatal("other errors must pass through unchanged")
 	}
 }

@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.7.4
+
+### Fixed
+
+- **"read-only file system" in the panel after a restore is detected and
+  fixed by the next upgrade.** When `/etc/ayana-cdn` (or the certificate
+  directory) is replaced while the edge runs, as a 2.7.1 restore did, systemd's
+  sandbox keeps showing the edge the new directory read-only: panel changes
+  fail with `lock config: ... read-only file system` and certificate renewals
+  fail. A zero-downtime restart keeps that view, so `ayana-cdn restart` now
+  detects it and refuses, telling you to run `sudo systemctl restart ayana-cdn`;
+  the installer then does that full restart by itself. The panel's error says
+  the same.
+
 ## 2.7.3
 
 ### Fixed
