@@ -23,9 +23,10 @@ rm -f /usr/local/bin/ayana-cdn /etc/sysctl.d/99-ayana-cdn.conf /etc/sysctl.d/98-
 	/etc/sysctl.d/99-cdn.conf /etc/modules-load.d/ayana-cdn.conf # the last two are v1 leftovers
 rm -rf /opt/ayana-cdn /run/ayana-cdn
 if [ "$purge" = 1 ]; then
-	rm -rf /etc/ayana-cdn /var/lib/ayana-cdn
+	# with the copies a restore leaves (setup.sh --restore); they hold the keys too
+	rm -rf /etc/ayana-cdn /var/lib/ayana-cdn /etc/ayana-cdn.*-restore-* /var/lib/ayana-cdn.*-restore-* /etc/ayana-cdn.restore.*
 	userdel ayana-cdn >/dev/null 2>&1 || true
-	echo "removed ayana-cdn, its config, its certificates and its service user"
+	echo "removed ayana-cdn, its config, its certificates and its service user (backups in /root are kept)"
 else
 	echo "removed ayana-cdn; kept /etc/ayana-cdn and /var/lib/ayana-cdn (rerun with --purge to delete them)"
 fi

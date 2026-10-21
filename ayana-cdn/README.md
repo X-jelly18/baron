@@ -153,7 +153,8 @@ release into `/usr/local/go`; v2 uses a private toolchain under
 ### Moving to a new VPS
 
 Every `setup.sh` run saves the settings to `/root/ayana-cdn-backup.tar.gz`
-(mode 600): the config with its domains, paths and servers, the panel login
+(mode 600; the backup it replaces is kept with its date in the name, the five
+newest): the config with its domains, paths and servers, the panel login
 and secret path, the routes file, and the ACME account and certificates. To
 save the current state at any time (for example after changes in the panel)
 without installing anything:
@@ -170,9 +171,10 @@ prompts:
 sudo ./setup.sh --restore /root/ayana-cdn-backup.tar.gz
 ```
 
-It puts the settings in place (anything the new VPS already had is moved to
-`/etc/ayana-cdn.before-restore-*`), installs, and keeps the routes, like
-`--keep-config`. The restored certificates serve at once, so nothing waits on
+It checks the archive and unpacks it aside first, stops an edge already
+running there, puts the settings in place (anything the new VPS already had is
+moved to `/etc/ayana-cdn.before-restore-*`, and put back if the install fails),
+installs, and keeps the routes, like `--keep-config`. The restored certificates serve at once, so nothing waits on
 Let's Encrypt. Then point the domains' DNS at the new VPS, install any service
 a path reaches on the VPS itself (`127.0.0.1:PORT`; setup lists them), and let
 servers that only accept the old VPS's address accept the new one. A plain

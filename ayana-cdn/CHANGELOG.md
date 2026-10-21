@@ -1,5 +1,31 @@
 # Changelog
 
+## 2.7.2
+
+### Fixed
+
+- **Restoring onto a VPS where the edge already runs** stops it first, and the
+  install starts it again. Before, systemd's sandbox kept the running edge on
+  the moved-aside directories, so after the zero-downtime restart the restored
+  config and certificates were read-only to it: panel saves and certificate
+  renewals failed until a reboot.
+- **A restore can be undone and cannot half-finish.** The archive is checked
+  and unpacked into a scratch directory before anything moves, so a broken or
+  truncated file, or a full disk, changes nothing. If the install then fails,
+  the VPS's previous settings are put back (and an edge that was running is
+  started again). The restored files belong to the service user at once.
+- A restore refuses archives with entries for `/`, `/etc` or `/var` themselves
+  (tar would have changed their permissions), as well as links and anything
+  outside ayana-cdn's two directories.
+- `--restore` combined with `--routes` or `--backup` (and `--backup` with
+  `--keep-config`) is refused instead of silently doing something else.
+- A backup never overwrites another: the one it replaces is kept with its date
+  in the name (the five newest), so a backup copied to `/root` from the old VPS
+  survives a later setup run. `--backup DIR` saves `DIR/ayana-cdn-backup.tar.gz`,
+  a path inside the backed-up directories is refused, the temporary file is
+  created safely, and linked certificate files are stored as plain files.
+- `uninstall.sh --purge` also deletes the copies a restore leaves behind.
+
 ## 2.7.1
 
 ### Added

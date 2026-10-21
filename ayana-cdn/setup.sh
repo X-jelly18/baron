@@ -27,21 +27,35 @@ backup_file=$BACKUP
 restore_file=""
 args=()
 
+# set_mode MODE: --keep-config (keep), --routes (file), --backup and --restore
+# each pick what this run does; they cannot be combined, except that a restore
+# already keeps the settings like --keep-config.
+set_mode() {
+	local flag
+	if [ "$mode" = prompt ] || [ "$mode" = "$1" ]; then mode=$1; return; fi
+	case "$mode$1" in restorekeep) return ;; keeprestore) mode=restore; return ;; esac
+	for flag in "$mode" "$1"; do
+		case "$flag" in keep) echo -n "--keep-config " ;; file) echo -n "--routes " ;; *) echo -n "--$flag " ;; esac
+	done >&2
+	echo "cannot be combined" >&2
+	exit 1
+}
+
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--keep-config) mode=keep ;;
+	--keep-config) set_mode keep ;;
 	--routes)
 		[ $# -ge 2 ] || { echo "--routes needs a file" >&2; exit 1; }
-		mode="file"; routes_file=$2; shift ;;
-	--routes=*) mode="file"; routes_file=${1#--routes=} ;;
+		set_mode file; routes_file=$2; shift ;;
+	--routes=*) set_mode file; routes_file=${1#--routes=} ;;
 	--backup)
-		mode=backup
+		set_mode backup
 		if [ $# -ge 2 ] && [[ $2 != -* ]]; then backup_file=$2; shift; fi ;;
-	--backup=*) mode=backup; backup_file=${1#--backup=} ;;
+	--backup=*) set_mode backup; backup_file=${1#--backup=} ;;
 	--restore)
 		[ $# -ge 2 ] || { echo "--restore needs the backup file" >&2; exit 1; }
-		mode=restore; restore_file=$2; shift ;;
-	--restore=*) mode=restore; restore_file=${1#--restore=} ;;
+		set_mode restore; restore_file=$2; shift ;;
+	--restore=*) set_mode restore; restore_file=${1#--restore=} ;;
 	-h | --help)
 		sed -n '2,/^set /{/^#/p}' "$0" | sed 's/^# \{0,1\}//'
 		exit 0 ;;
@@ -53,31 +67,47 @@ done
 
 # ---- backup and restore ---------------------------------------------------------------
 
+SERVICE_USER=ayana-cdn
+
 # save_backup FILE: everything that makes this edge what it is, in one archive:
 # the config (domains, paths and servers, panel login and secret path), the
 # routes file, and the ACME account and certificates, so a new VPS serves at
 # once without asking Let's Encrypt again. The file holds private keys: it is
-# written mode 600, and the previous one is kept as *.prev.tar.gz.
+# written mode 600. A backup it replaces is kept with its date in the name
+# (the five newest), so a run never loses one. Sets SAVED_TO.
 save_backup() {
-	local out=$1 tmp manifest members=(etc/ayana-cdn)
+	local out=$1 tmp manifest old members=(etc/ayana-cdn)
+	[ -n "$out" ] || { echo "--backup needs a file name" >&2; return 1; }
+	[ ! -d "$out" ] || out=${out%/}/ayana-cdn-backup.tar.gz
+	out=$(realpath -m "$out")
+	case "$out" in "$CONF_DIR"/* | "$STATE_DIR"/*)
+		echo "save the backup outside $CONF_DIR and $STATE_DIR (it would contain itself)" >&2
+		return 1 ;;
+	esac
 	[ -f "$CONF" ] || { echo "nothing to save: no $CONF" >&2; return 1; }
-	[ -d "$STATE_DIR" ] && members+=(var/lib/ayana-cdn)
+	[ ! -d "$STATE_DIR" ] || members+=(var/lib/ayana-cdn)
 	mkdir -p "$(dirname "$out")"
+	tmp=$(mktemp "$out.XXXXXX") || return 1 # mode 600, never an existing file
 	manifest=$(mktemp -d)
 	{
 		echo "ayana-cdn backup"
 		echo "created $(date -u +%Y-%m-%dT%H:%M:%SZ) on $(hostname 2>/dev/null || echo '?')"
 		echo "version $(ayana-cdn version 2>/dev/null || echo '?')"
 	} >"$manifest/ayana-cdn-backup.txt"
-	tmp="$out.tmp.$$"
-	(umask 077 && tar -czf "$tmp" --dereference --exclude='*.lock' --exclude='*.tmp' \
-		-C "$manifest" ayana-cdn-backup.txt -C "$ROOT" "${members[@]}") || {
+	# Links are stored as the files they point to, so a restore gets plain files.
+	if ! (umask 077 && tar -czf "$tmp" --dereference --hard-dereference --exclude='*.lock' \
+		-C "$manifest" ayana-cdn-backup.txt -C "$ROOT" "${members[@]}"); then
 		rm -rf "$tmp" "$manifest"
 		return 1
-	}
+	fi
 	rm -rf "$manifest"
-	[ ! -f "$out" ] || mv -f "$out" "${out%.tar.gz}.prev.tar.gz"
-	mv -f "$tmp" "$out"
+	if [ -f "$out" ]; then
+		old="${out%.tar.gz}.$(date -r "$out" +%Y%m%d-%H%M%S).tar.gz"
+		mv -f "$out" "$old"
+		ls -1t "${out%.tar.gz}".2*.tar.gz 2>/dev/null | tail -n +6 | while IFS= read -r old; do rm -f -- "$old"; done || true
+	fi
+	mv -f "$tmp" "$out" || { rm -f "$tmp"; return 1; }
+	SAVED_TO=$out
 	# Certificate files kept outside /etc/ayana-cdn are not in the archive.
 	if command -v python3 >/dev/null; then
 		python3 - "$CONF" <<'PY' || true
@@ -98,52 +128,88 @@ backup_hint() {
 }
 
 # restore_backup FILE: put a backup's settings in place before the install, so
-# the installer keeps them (like an upgrade with --keep-config). Whatever this
-# VPS already had is moved aside, not deleted.
+# the installer keeps them (like an upgrade with --keep-config). The archive is
+# checked and unpacked into a scratch directory first, so a wrong file or a
+# full disk changes nothing; whatever this VPS already had is moved aside, not
+# deleted, and undo_restore puts it back if the install then fails.
+RESTORE_TS="" stopped_for_restore=0 restore_moved=()
 restore_backup() {
-	local f=$1 list n t ts d user
+	local f=$1 list n t stage src dst
 	[ -f "$f" ] || { echo "no such file: $f" >&2; exit 1; }
 	tar -tzf "$f" >/dev/null 2>&1 || { echo "$f is not a backup (.tar.gz) file" >&2; exit 1; }
 	list=$(paste -d '\t' <(tar -tvzf "$f" | cut -c1) <(tar -tzf "$f"))
-	# Only regular files and directories of ayana-cdn's own two directories.
+	# Only regular files and directories inside ayana-cdn's own two directories:
+	# no links, and no entries for /, /etc or /var themselves.
 	while IFS=$'\t' read -r t n; do
 		n=${n#./}
 		case "$n" in
 		/* | .. | ../* | */../* | */..) ;;
-		"" | ayana-cdn-backup.txt | etc/ | var/ | var/lib/ | etc/ayana-cdn | etc/ayana-cdn/* | var/lib/ayana-cdn | var/lib/ayana-cdn/*)
+		ayana-cdn-backup.txt | etc/ayana-cdn | etc/ayana-cdn/* | var/lib/ayana-cdn | var/lib/ayana-cdn/*)
 			[[ $t == [-d] ]] && continue ;;
 		esac
-		echo "$f is not an ayana-cdn backup: it contains $n" >&2
+		echo "$f is not an ayana-cdn backup: it contains ${n:-./}" >&2
 		exit 1
 	done <<<"$list"
-	grep -qE $'\t(\\./)?etc/ayana-cdn/config\\.json$' <<<"$list" || {
-		echo "$f is not an ayana-cdn backup: it has no etc/ayana-cdn/config.json" >&2
-		exit 1
-	}
 	echo "==> restoring the settings from $f"
 	tar -xzOf "$f" ayana-cdn-backup.txt 2>/dev/null | sed -n '2,3s/^/    /p' || true
-	ts=$(date +%Y%m%d-%H%M%S)
-	for d in "$CONF_DIR" "$STATE_DIR"; do
-		if [ -e "$d" ]; then
-			mv "$d" "$d.before-restore-$ts"
-			echo "    this VPS's previous $d is kept as $d.before-restore-$ts"
-		fi
-	done
-	tar -xzf "$f" -C "$ROOT" --no-same-owner --exclude=ayana-cdn-backup.txt --exclude=./ayana-cdn-backup.txt
-	# The installer gives $CONF_DIR to the service user; an edge already running
-	# here is restarted by it and must be able to read the certificates.
-	user=ayana-cdn
-	if [ -d "$STATE_DIR" ] && id -u "$user" >/dev/null 2>&1; then
-		chown -R "$user:$user" "$STATE_DIR"
+	mkdir -p "$(dirname "$CONF_DIR")"
+	stage=$(mktemp -d "$CONF_DIR.restore.XXXXXX")
+	if ! tar -xzf "$f" -C "$stage" --no-same-owner --exclude=ayana-cdn-backup.txt --exclude=./ayana-cdn-backup.txt ||
+		[ ! -f "$stage/etc/ayana-cdn/config.json" ]; then
+		rm -rf "$stage"
+		echo "$f could not be unpacked, or has no etc/ayana-cdn/config.json; nothing was changed" >&2
+		exit 1
 	fi
+	# A running edge sees these directories through systemd's sandbox, which
+	# would keep pointing at the old ones: stop it, and the install starts it
+	# again with the restored settings.
+	if command -v systemctl >/dev/null && systemctl is-active --quiet ayana-cdn 2>/dev/null; then
+		echo "    stopping the edge running on this VPS for the restore"
+		systemctl stop ayana-cdn
+		stopped_for_restore=1
+	fi
+	RESTORE_TS=$(date +%Y%m%d-%H%M%S)
+	for src in etc/ayana-cdn var/lib/ayana-cdn; do
+		[ -d "$stage/$src" ] || continue
+		dst=$ROOT$src
+		if [ -e "$dst" ]; then
+			mv "$dst" "$dst.before-restore-$RESTORE_TS"
+			restore_moved+=("$dst")
+			echo "    this VPS's previous $dst is kept as $dst.before-restore-$RESTORE_TS"
+		fi
+		mkdir -p "$(dirname "$dst")"
+		mv "$stage/$src" "$dst"
+	done
+	rm -rf "$stage"
+	# The files belong to the service user (the installer does it too, but
+	# only once it has built the new binary).
+	if id -u "$SERVICE_USER" >/dev/null 2>&1; then
+		for dst in "$CONF_DIR" "$STATE_DIR"; do
+			[ ! -d "$dst" ] || chown -R "$SERVICE_USER:$SERVICE_USER" "$dst"
+		done
+	fi
+}
+
+# undo_restore: the install failed after a restore; put back what this VPS had.
+undo_restore() {
+	local d
+	for d in ${restore_moved[@]+"${restore_moved[@]}"}; do
+		[ ! -e "$d" ] || mv "$d" "$d.failed-restore-$RESTORE_TS"
+		mv "$d.before-restore-$RESTORE_TS" "$d"
+		echo "    put this VPS's previous $d back (the restored one is in $d.failed-restore-$RESTORE_TS)" >&2
+	done
+	if [ "$stopped_for_restore" = 1 ]; then
+		systemctl start ayana-cdn || true
+	fi
+	echo "the install failed, so the restore was undone; fix the error above and run: sudo $0 --restore $restore_file" >&2
 }
 
 restored=0
 case "$mode" in
 backup)
 	save_backup "$backup_file"
-	echo "==> saved the settings to $backup_file (keep it private: it holds the panel login and the TLS keys)"
-	backup_hint "$backup_file"
+	echo "==> saved the settings to $SAVED_TO (keep it private: it holds the panel login and the TLS keys)"
+	backup_hint "$SAVED_TO"
 	exit 0 ;;
 restore)
 	restore_backup "$restore_file"
@@ -187,12 +253,15 @@ else
 	export AYANA_CDN_DOMAIN="$DOMAIN" AYANA_CDN_EMAIL="$EMAIL"
 fi
 
-"$DIR/deploy/install.sh" "${args[@]}"
+if ! "$DIR/deploy/install.sh" "${args[@]}"; then
+	[ "$restored" = 0 ] || undo_restore
+	exit 1
+fi
 
 # Restored certificates belong to the service user, which the installer may
 # have only just created (systemd also fixes this when it starts the service).
-if [ "$restored" = 1 ] && [ -d "$STATE_DIR" ] && id -u ayana-cdn >/dev/null 2>&1; then
-	chown -R ayana-cdn:ayana-cdn "$STATE_DIR"
+if [ "$restored" = 1 ] && [ -d "$STATE_DIR" ] && id -u "$SERVICE_USER" >/dev/null 2>&1; then
+	chown -R "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR"
 fi
 
 # ---- routes --------------------------------------------------------------------------
@@ -321,8 +390,8 @@ esac
 
 echo
 if save_backup "$BACKUP"; then
-	echo "==> saved the settings to $BACKUP (keep it private: it holds the panel login and the TLS keys)"
-	backup_hint "$BACKUP"
+	echo "==> saved the settings to $SAVED_TO (keep it private: it holds the panel login and the TLS keys)"
+	backup_hint "$SAVED_TO"
 else
 	echo "warning: could not save the settings to $BACKUP" >&2
 fi
