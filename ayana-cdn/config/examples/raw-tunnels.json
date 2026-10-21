@@ -1,0 +1,11 @@
+{
+  "cdn_hosts": ["cdn.example.com"],
+  "tls": { "mode": "acme", "email": "admin@example.com" },
+  "timeouts": { "tunnel_idle": "30m", "drain": "2h" },
+  "limits": { "max_conns_per_ip": 64 },
+  "backends": [
+    { "name": "ssh",     "upstream": "127.0.0.1:2222", "proto": "ws", "relay": "always", "idle_timeout": "2h" },
+    { "name": "py",      "upstream": "127.0.0.1:8880", "proto": "ws" },
+    { "name": "stunnel", "upstream": "127.0.0.1:4430", "host": "localhost", "insecure": true, "relay": "always" }
+  ]
+}

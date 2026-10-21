@@ -1,0 +1,10 @@
+{
+  "listen": "127.0.0.1:8443",
+  "proxy_protocol": true,
+  "proxy_protocol_trusted": ["127.0.0.1/32", "::1/128"],
+  "cdn_hosts": ["cdn.example.com"],
+  "tls": { "mode": "acme", "email": "admin@example.com" },
+  "backends": [
+    { "name": "native1", "upstream": "native1.example.com:443" }
+  ]
+}

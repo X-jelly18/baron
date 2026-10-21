@@ -1,0 +1,17 @@
+{
+  "cdn_hosts": ["cdn.example.com"],
+  "tls": { "mode": "acme", "email": "admin@example.com" },
+  "panel": {
+    "enabled": true,
+    "path": "/__ayana_REPLACE_WITH_A_LONG_RANDOM_PREFIX",
+    "username": "admin",
+    "password_hash": "$2a$10$REPLACE_set_it_with__ayana-cdn_panel_passwd____________",
+    "session_key": "REPLACE_base64_of_32_random_bytes_or_leave_empty_for_random",
+    "session_ttl": "12h",
+    "allow_control": false,
+    "allowed_cidrs": []
+  },
+  "backends": [
+    { "name": "native1", "upstream": "native1.example.com:443" }
+  ]
+}

@@ -1,0 +1,74 @@
+[Unit]
+Description=ayana-cdn TLS edge (WebSocket tunnels and HTTP backends)
+Documentation=file:/opt/ayana-cdn/src/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# notify: the edge reports READY=1 once it is serving, and during a
+# zero-downtime restart hands systemd the new main PID (MAINPID=).
+Type=notify
+NotifyAccess=main
+User=ayana-cdn
+Group=ayana-cdn
+ExecStart=/usr/local/bin/ayana-cdn serve -config /etc/ayana-cdn/config.json
+# reload = apply config changes (SIGHUP); nothing is dropped.
+ExecReload=/bin/kill -HUP $MAINPID
+# `ayana-cdn restart` (SIGUSR2) replaces the process without dropping
+# connections; `systemctl restart` is a hard restart (tunnels reconnect).
+Restart=always
+RestartSec=2
+# A stop closes tunnels at once and gives HTTP requests 5 s (shutdown_grace).
+TimeoutStopSec=30
+
+# Bind :443 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Writable state (ACME certificates) and runtime (pid file), owned by the
+# service user; systemd fixes ownership if they already exist.
+StateDirectory=ayana-cdn
+StateDirectoryMode=0750
+RuntimeDirectory=ayana-cdn
+RuntimeDirectoryPreserve=yes
+UMask=0027
+
+# Each tunnel uses two file descriptors (client and backend).
+LimitNOFILE=1048576
+
+# GOMEMLIMIT is set by the installer in ayana-cdn.service.d/10-memory.conf
+# (about 75% of RAM), so the Go runtime collects harder before the kernel
+# OOM killer would step in.
+
+# The config lives here; the service may rewrite it when you make changes from
+# the web panel (ayana-cdn panel enable -control) or it would be denied by
+# ProtectSystem=strict. The CLI (ayana-cdn backend/panel ...) runs as your
+# shell user and does not need this. Remove the line to keep the config
+# read-only to the service (panel control actions then report a write error).
+ReadWritePaths=/etc/ayana-cdn
+
+# Sandboxing. (SystemCallFilter is intentionally not set here: see
+# docs/OPERATIONS.md, "Optional hardening", before enabling it.)
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+RemoveIPC=true
+
+[Install]
+WantedBy=multi-user.target

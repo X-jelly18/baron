@@ -1,0 +1,18 @@
+# Compiled binary
+/ayana-cdn
+ayana-cdn-v*.zip
+
+# Runtime state written by the service / panel (never commit real routes/backends)
+/routes.json
+/config/config.local.json
+
+# Go build/test artifacts
+*.test
+*.out
+/bin/
+/dist/
+
+# Local toolchain / caches (installer uses /opt/ayana-cdn for these on servers)
+/go/
+/gopath/
+/cache/

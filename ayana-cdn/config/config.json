@@ -1,0 +1,10 @@
+{
+  "listen": ":443",
+  "cdn_hosts": ["cdn.example.com"],
+  "tls": { "mode": "acme", "email": "admin@example.com" },
+  "backends": [
+    { "name": "p6CAaNg", "upstream": "de.example.com:80", "proto": "ws", "strip": false },
+    { "name": "wspeed",  "upstream": "198.51.100.76:80",         "proto": "ws", "strip": false },
+    { "name": "zuzu",    "upstream": "203.0.113.21:80",        "proto": "ws", "strip": false }
+  ]
+}
