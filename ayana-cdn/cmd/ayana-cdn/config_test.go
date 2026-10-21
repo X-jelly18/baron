@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -351,5 +352,44 @@ func TestSaveRawKeepsFileMinimal(t *testing.T) {
 	}
 	if _, err := LoadConfig(path); err != nil {
 		t.Fatalf("saved config does not load: %v", err)
+	}
+}
+
+// A config edit made as root (the CLI) leaves the file to the owner of the
+// config directory (the service user), so a 0640 config stays readable by
+// the service and its panel.
+func TestSaveRawAsRootKeepsServiceOwner(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	dir := filepath.Join(t.TempDir(), "etc")
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	const uid, gid = 4242, 4343
+	if err := os.Chown(dir, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "config.json")
+	data, _ := os.ReadFile("testdata/v1-config.json")
+	if err := os.WriteFile(path, data, 0o640); err != nil { // root-owned, like after an older CLI edit
+		t.Fatal(err)
+	}
+	raw, err := loadRaw(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveRaw(path, raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{path, path + ".bak"} {
+		fi, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := fi.Sys().(*syscall.Stat_t)
+		if st.Uid != uid || st.Gid != gid || fi.Mode().Perm() != 0o640 {
+			t.Errorf("%s: owner %d:%d mode %v, want %d:%d 0640", filepath.Base(p), st.Uid, st.Gid, fi.Mode().Perm(), uid, gid)
+		}
 	}
 }

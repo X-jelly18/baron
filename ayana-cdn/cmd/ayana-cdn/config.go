@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -1000,18 +1001,25 @@ func withConfigLock(path string, fn func() error) error {
 		return fmt.Errorf("lock config: %w", err)
 	}
 	// CLI operations are often run as root while the service/panel runs as the
-	// dedicated service user. If root creates the lock, align its ownership
-	// with the config file so the panel can open it on later requests.
-	if fi, statErr := os.Stat(path); statErr == nil {
-		if st, ok := fi.Sys().(*syscall.Stat_t); ok && os.Geteuid() == 0 {
-			if err := os.Chown(lockPath, int(st.Uid), int(st.Gid)); err != nil {
-				lf.Close()
-				return fmt.Errorf("set config lock ownership: %w", err)
+	// dedicated service user. If root creates the lock, give it to whoever
+	// owns the config directory (else the config file) so the panel can open
+	// it on later requests.
+	uid, gid, owned := configOwner(path)
+	if !owned && os.Geteuid() == 0 {
+		if fi, statErr := os.Stat(path); statErr == nil {
+			if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+				uid, gid, owned = int(st.Uid), int(st.Gid), true
 			}
-			if err := os.Chmod(lockPath, 0o600); err != nil {
-				lf.Close()
-				return fmt.Errorf("set config lock permissions: %w", err)
-			}
+		}
+	}
+	if owned {
+		if err := os.Chown(lockPath, uid, gid); err != nil {
+			lf.Close()
+			return fmt.Errorf("set config lock ownership: %w", err)
+		}
+		if err := os.Chmod(lockPath, 0o600); err != nil {
+			lf.Close()
+			return fmt.Errorf("set config lock permissions: %w", err)
 		}
 	}
 	defer lf.Close()
@@ -1038,6 +1046,19 @@ func saveRaw(path string, c *Config) error {
 	if err != nil {
 		return err
 	}
+	// The CLI usually runs as root while the service and its panel run as the
+	// service user, who owns the config directory (the installer sees to it).
+	// A file root writes there goes to that user, or a 0640 config would become
+	// unreadable to the service: panel edits and reloads fail with "permission
+	// denied", and the next start fails.
+	uid, gid, chown := configOwner(path)
+	if chown {
+		if err := f.Chown(uid, gid); err != nil {
+			f.Close()
+			os.Remove(tmp)
+			return fmt.Errorf("set config ownership: %w", err)
+		}
+	}
 	if _, err := f.Write(out); err != nil {
 		f.Close()
 		return err
@@ -1052,7 +1073,27 @@ func saveRaw(path string, c *Config) error {
 	if old, err := os.ReadFile(path); err == nil {
 		if err := os.WriteFile(path+".bak", old, mode); err != nil {
 			slog.Warn("could not write config backup", "err", err)
+		} else if chown {
+			_ = os.Chown(path+".bak", uid, gid)
 		}
 	}
 	return os.Rename(tmp, path)
+}
+
+// configOwner returns the owner of the config file's directory when this
+// process is root and that owner is not, i.e. who a file root writes there
+// should belong to.
+func configOwner(path string) (uid, gid int, ok bool) {
+	if os.Geteuid() != 0 {
+		return 0, 0, false
+	}
+	fi, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return 0, 0, false
+	}
+	st, isStat := fi.Sys().(*syscall.Stat_t)
+	if !isStat || st.Uid == 0 {
+		return 0, 0, false
+	}
+	return int(st.Uid), int(st.Gid), true
 }

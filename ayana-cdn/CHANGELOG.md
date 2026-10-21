@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.7.3
+
+### Fixed
+
+- **The panel could lose permission to change the config** ("permission
+  denied" when adding a path or domain, or on reload) after any `ayana-cdn`
+  command run as root (`backend add/set`, `panel enable`, `routes import`, a
+  setup run). Such a command rewrote `config.json` owned by root, so a config
+  with mode 640 became unreadable to the service user that the edge and its
+  panel run as, and its lock file could be left root-only too; the next
+  restart would have failed. Files root writes in `/etc/ayana-cdn` now belong
+  to the owner of that directory (the service user), and a broken install is
+  repaired by the next such command, or right away with:
+  `sudo chown -R ayana-cdn:ayana-cdn /etc/ayana-cdn && sudo systemctl restart ayana-cdn`.
+
 ## 2.7.2
 
 ### Fixed
