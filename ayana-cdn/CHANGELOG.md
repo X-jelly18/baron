@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.7.1
+
+### Added
+
+- **Move the settings to a new VPS.** Every `setup.sh` run now saves the
+  config (domains, paths and servers, panel login and secret path), the routes
+  file and the ACME account and certificates to
+  `/root/ayana-cdn-backup.tar.gz` (mode 600; the previous one is kept as
+  `ayana-cdn-backup.prev.tar.gz`). `sudo ./setup.sh --backup [FILE]` saves it
+  at any time without installing. On the new VPS,
+  `sudo ./setup.sh --restore FILE` puts the settings in place, moves anything
+  already there to `*.before-restore-*`, installs with the settings kept (like
+  `--keep-config`), and lists what is left to do: the DNS of each domain,
+  services on the VPS itself that a path reaches, and servers that only accept
+  the old address. The restored certificates serve at once, without a new
+  Let's Encrypt order. A restore accepts only regular files of ayana-cdn's own
+  two directories, so a wrong or tampered archive is refused before anything
+  is touched; a plain `tar` of `/etc/ayana-cdn` and `/var/lib/ayana-cdn`
+  restores the same way.
+
 ## 2.7.0
 
 ### Changed

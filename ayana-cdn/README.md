@@ -150,6 +150,35 @@ your other tunnel service, which most tunnel servers reject; the v2
 release into `/usr/local/go`; v2 uses a private toolchain under
 `/opt/ayana-cdn` and never touches `/usr/local/go`.
 
+### Moving to a new VPS
+
+Every `setup.sh` run saves the settings to `/root/ayana-cdn-backup.tar.gz`
+(mode 600): the config with its domains, paths and servers, the panel login
+and secret path, the routes file, and the ACME account and certificates. To
+save the current state at any time (for example after changes in the panel)
+without installing anything:
+
+```sh
+sudo ./setup.sh --backup                 # or --backup FILE
+scp /root/ayana-cdn-backup.tar.gz root@NEW-VPS-IP:/root/
+```
+
+On the new VPS, unpack the package and restore instead of answering the
+prompts:
+
+```sh
+sudo ./setup.sh --restore /root/ayana-cdn-backup.tar.gz
+```
+
+It puts the settings in place (anything the new VPS already had is moved to
+`/etc/ayana-cdn.before-restore-*`), installs, and keeps the routes, like
+`--keep-config`. The restored certificates serve at once, so nothing waits on
+Let's Encrypt. Then point the domains' DNS at the new VPS, install any service
+a path reaches on the VPS itself (`127.0.0.1:PORT`; setup lists them), and let
+servers that only accept the old VPS's address accept the new one. A plain
+`tar czf FILE -C / etc/ayana-cdn var/lib/ayana-cdn` restores the same way.
+The backup holds private keys and the panel login: keep it private.
+
 ## Everyday commands
 
 | Command | What it does |
@@ -238,7 +267,8 @@ sent itself.
 
 ## Package contents
 
-    setup.sh               one command: install/upgrade, prompt for the routes, check, status
+    setup.sh               one command: install/upgrade, prompt for the routes, check, status;
+                           --backup / --restore to move the settings to a new VPS
     routes.json            example routes file, in the Cloud Run relay's format
     cmd/ayana-cdn/         the program and its tests (testdata/v1-config.json is v1's shipped config)
     config/config.json     the same routes as a full config; config/examples/ for one server per

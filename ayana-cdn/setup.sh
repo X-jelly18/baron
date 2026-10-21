@@ -6,15 +6,25 @@
 #   sudo ./setup.sh                    interactive: prompts for the routes
 #   sudo ./setup.sh --routes FILE      apply a routes.json instead of prompting
 #   sudo ./setup.sh --keep-config      upgrade only: keep the domains, email and routes
+#   sudo ./setup.sh --backup [FILE]    only save the settings (to move them to a new VPS)
+#   sudo ./setup.sh --restore FILE     new VPS: install with the settings of a backup
 #   (other options are passed to deploy/install.sh, e.g. --test --no-sysctl)
 #
-# Routes you enter are saved to /etc/ayana-cdn/routes.json.
+# Routes you enter are saved to /etc/ayana-cdn/routes.json. Every run also saves
+# the settings (config, routes, panel login, certificates) to
+# /root/ayana-cdn-backup.tar.gz, ready for --restore on another VPS.
 set -Eeuo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONF=/etc/ayana-cdn/config.json
-ROUTES=/etc/ayana-cdn/routes.json
+ROOT=/ # the system root; everything below is relative to it
+CONF_DIR=${ROOT}etc/ayana-cdn
+STATE_DIR=${ROOT}var/lib/ayana-cdn # ACME account and certificates
+CONF=$CONF_DIR/config.json
+ROUTES=$CONF_DIR/routes.json
+BACKUP=${ROOT}root/ayana-cdn-backup.tar.gz
 mode=prompt
 routes_file=""
+backup_file=$BACKUP
+restore_file=""
 args=()
 
 while [ $# -gt 0 ]; do
@@ -24,14 +34,121 @@ while [ $# -gt 0 ]; do
 		[ $# -ge 2 ] || { echo "--routes needs a file" >&2; exit 1; }
 		mode="file"; routes_file=$2; shift ;;
 	--routes=*) mode="file"; routes_file=${1#--routes=} ;;
+	--backup)
+		mode=backup
+		if [ $# -ge 2 ] && [[ $2 != -* ]]; then backup_file=$2; shift; fi ;;
+	--backup=*) mode=backup; backup_file=${1#--backup=} ;;
+	--restore)
+		[ $# -ge 2 ] || { echo "--restore needs the backup file" >&2; exit 1; }
+		mode=restore; restore_file=$2; shift ;;
+	--restore=*) mode=restore; restore_file=${1#--restore=} ;;
 	-h | --help)
-		sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+		sed -n '2,/^set /{/^#/p}' "$0" | sed 's/^# \{0,1\}//'
 		exit 0 ;;
 	*) args+=("$1") ;;
 	esac
 	shift
 done
 [ "$(id -u)" -eq 0 ] || { echo "run as root: sudo $0" >&2; exit 1; }
+
+# ---- backup and restore ---------------------------------------------------------------
+
+# save_backup FILE: everything that makes this edge what it is, in one archive:
+# the config (domains, paths and servers, panel login and secret path), the
+# routes file, and the ACME account and certificates, so a new VPS serves at
+# once without asking Let's Encrypt again. The file holds private keys: it is
+# written mode 600, and the previous one is kept as *.prev.tar.gz.
+save_backup() {
+	local out=$1 tmp manifest members=(etc/ayana-cdn)
+	[ -f "$CONF" ] || { echo "nothing to save: no $CONF" >&2; return 1; }
+	[ -d "$STATE_DIR" ] && members+=(var/lib/ayana-cdn)
+	mkdir -p "$(dirname "$out")"
+	manifest=$(mktemp -d)
+	{
+		echo "ayana-cdn backup"
+		echo "created $(date -u +%Y-%m-%dT%H:%M:%SZ) on $(hostname 2>/dev/null || echo '?')"
+		echo "version $(ayana-cdn version 2>/dev/null || echo '?')"
+	} >"$manifest/ayana-cdn-backup.txt"
+	tmp="$out.tmp.$$"
+	(umask 077 && tar -czf "$tmp" --dereference --exclude='*.lock' --exclude='*.tmp' \
+		-C "$manifest" ayana-cdn-backup.txt -C "$ROOT" "${members[@]}") || {
+		rm -rf "$tmp" "$manifest"
+		return 1
+	}
+	rm -rf "$manifest"
+	[ ! -f "$out" ] || mv -f "$out" "${out%.tar.gz}.prev.tar.gz"
+	mv -f "$tmp" "$out"
+	# Certificate files kept outside /etc/ayana-cdn are not in the archive.
+	if command -v python3 >/dev/null; then
+		python3 - "$CONF" <<'PY' || true
+import json, sys
+t = json.load(open(sys.argv[1])).get("tls") or {}
+if t.get("mode") == "files":
+    out = [p for p in (t.get("cert_file"), t.get("key_file")) if p and not p.startswith("/etc/ayana-cdn/")]
+    if out:
+        print("warning: copy these certificate files to the same paths on the new VPS yourself: " + ", ".join(out))
+PY
+	fi
+}
+
+backup_hint() {
+	echo "    To move to a new VPS, copy it there and restore it:"
+	echo "      scp $1 root@NEW-VPS-IP:/root/"
+	echo "      (on the new VPS, in this package) sudo ./setup.sh --restore /root/$(basename "$1")"
+}
+
+# restore_backup FILE: put a backup's settings in place before the install, so
+# the installer keeps them (like an upgrade with --keep-config). Whatever this
+# VPS already had is moved aside, not deleted.
+restore_backup() {
+	local f=$1 list n t ts d user
+	[ -f "$f" ] || { echo "no such file: $f" >&2; exit 1; }
+	tar -tzf "$f" >/dev/null 2>&1 || { echo "$f is not a backup (.tar.gz) file" >&2; exit 1; }
+	list=$(paste -d '\t' <(tar -tvzf "$f" | cut -c1) <(tar -tzf "$f"))
+	# Only regular files and directories of ayana-cdn's own two directories.
+	while IFS=$'\t' read -r t n; do
+		n=${n#./}
+		case "$n" in
+		/* | .. | ../* | */../* | */..) ;;
+		"" | ayana-cdn-backup.txt | etc/ | var/ | var/lib/ | etc/ayana-cdn | etc/ayana-cdn/* | var/lib/ayana-cdn | var/lib/ayana-cdn/*)
+			[[ $t == [-d] ]] && continue ;;
+		esac
+		echo "$f is not an ayana-cdn backup: it contains $n" >&2
+		exit 1
+	done <<<"$list"
+	grep -qE $'\t(\\./)?etc/ayana-cdn/config\\.json$' <<<"$list" || {
+		echo "$f is not an ayana-cdn backup: it has no etc/ayana-cdn/config.json" >&2
+		exit 1
+	}
+	echo "==> restoring the settings from $f"
+	tar -xzOf "$f" ayana-cdn-backup.txt 2>/dev/null | sed -n '2,3s/^/    /p' || true
+	ts=$(date +%Y%m%d-%H%M%S)
+	for d in "$CONF_DIR" "$STATE_DIR"; do
+		if [ -e "$d" ]; then
+			mv "$d" "$d.before-restore-$ts"
+			echo "    this VPS's previous $d is kept as $d.before-restore-$ts"
+		fi
+	done
+	tar -xzf "$f" -C "$ROOT" --no-same-owner --exclude=ayana-cdn-backup.txt --exclude=./ayana-cdn-backup.txt
+	# The installer gives $CONF_DIR to the service user; an edge already running
+	# here is restarted by it and must be able to read the certificates.
+	user=ayana-cdn
+	if [ -d "$STATE_DIR" ] && id -u "$user" >/dev/null 2>&1; then
+		chown -R "$user:$user" "$STATE_DIR"
+	fi
+}
+
+restored=0
+case "$mode" in
+backup)
+	save_backup "$backup_file"
+	echo "==> saved the settings to $backup_file (keep it private: it holds the panel login and the TLS keys)"
+	backup_hint "$backup_file"
+	exit 0 ;;
+restore)
+	restore_backup "$restore_file"
+	mode=keep restored=1 ;;
+esac
 
 # Where to read answers from: the terminal, even under sudo or a pipe.
 IN=""
@@ -71,6 +188,12 @@ else
 fi
 
 "$DIR/deploy/install.sh" "${args[@]}"
+
+# Restored certificates belong to the service user, which the installer may
+# have only just created (systemd also fixes this when it starts the service).
+if [ "$restored" = 1 ] && [ -d "$STATE_DIR" ] && id -u ayana-cdn >/dev/null 2>&1; then
+	chown -R ayana-cdn:ayana-cdn "$STATE_DIR"
+fi
 
 # ---- routes --------------------------------------------------------------------------
 
@@ -194,6 +317,16 @@ prompt)
 	fi ;;
 esac
 
+# ---- save the settings ----------------------------------------------------------------
+
+echo
+if save_backup "$BACKUP"; then
+	echo "==> saved the settings to $BACKUP (keep it private: it holds the panel login and the TLS keys)"
+	backup_hint "$BACKUP"
+else
+	echo "warning: could not save the settings to $BACKUP" >&2
+fi
+
 # ---- verify --------------------------------------------------------------------------
 
 echo
@@ -213,4 +346,23 @@ for b in c.get("backends", []):
 '
 else
 	echo "the edge is not running yet: systemctl start ayana-cdn, then: ayana-cdn status"
+fi
+
+if [ "$restored" = 1 ]; then
+	echo
+	echo "==> restored from $restore_file. Before clients use this VPS:"
+	python3 - "$CONF" <<'PY' || true
+import json, sys
+c = json.load(open(sys.argv[1]))
+hosts = c.get("cdn_hosts") or ([c["cdn_host"]] if c.get("cdn_host") else [])
+print("  - point the DNS of %s at this VPS's IP" % (", ".join(hosts) or "your domains"))
+local = []
+for b in c.get("backends", []):
+    for u in [b.get("upstream")] + list(b.get("upstreams") or []):
+        if u and u.rsplit(":", 1)[0].strip("[]") in ("127.0.0.1", "localhost", "::1"):
+            local.append("/%s/ -> %s" % (b.get("name"), u))
+if local:
+    print("  - these paths go to services on the VPS itself; install them here too: " + ", ".join(local))
+print("  - servers that only accept the old VPS's IP must now accept this one")
+PY
 fi
